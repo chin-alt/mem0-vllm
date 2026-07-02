@@ -433,7 +433,27 @@ accuracy = number of hit IDs / N
 ```
 
 The xlsx summary keeps the original `query` and `PageId`, plus model recalled
-IDs, hit IDs, missing IDs, per-query accuracy, and estimated inference time.
+IDs, model scores, hit IDs, missing IDs, per-query accuracy, and estimated
+inference time. `predictions.jsonl` also stores every reranked document with its
+raw model `score`.
+
+The script also supports a dynamic score-based cutoff requested for business
+evaluation. For each query, scores are min-max normalized, prefix sums are
+computed, and the cutoff is selected by maximizing:
+
+```text
+ExpectedFbeta@k = (1 + beta^2) * cumulative_gain@k / (beta^2 * total_gain + k)
+```
+
+The default is `beta=0.3`, configurable through:
+
+```bash
+EXPECTED_FBETA_BETA=0.3 bash scripts/eval_business.sh
+```
+
+Per-query outputs include `BestK@ExpectedFbeta`, `ExpectedFbeta@BestK`,
+`BestK截断ID`, `BestK截断ID和分数`, `Precision@BestK`, `Recall@BestK`, and
+`F1@BestK`. Matrix summary tables also include the averaged BestK metrics.
 Business metrics are averaged over all ground-truth queries, so a query with no
 matched recalled docs contributes zero instead of silently disappearing.
 
@@ -446,6 +466,7 @@ for the latency-delay experiment, run:
 CUDA_VISIBLE_DEVICES=0 \
 MAX_LENGTH=2048 \
 BATCH_SIZE=4 \
+EXPECTED_FBETA_BETA=0.3 \
 PRECISION=fp16 \
 ATTN_IMPLEMENTATION=flash_attention_2 \
 bash scripts/eval_business_matrix.sh

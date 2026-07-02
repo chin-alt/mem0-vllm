@@ -10,6 +10,7 @@ Environment overrides:
   CUDA_VISIBLE_DEVICES  GPU ids for evaluation. Default: 0
   MAX_LENGTH            Max sequence length. Default: 2048
   BATCH_SIZE            Inference batch size. Default: 4
+  EXPECTED_FBETA_BETA   Beta for dynamic Expected-Fbeta cutoff. Default: 0.3
   PRECISION             fp16, bf16, or fp32. Default: fp16
   ATTN_IMPLEMENTATION   transformers attention backend. Default: flash_attention_2
   SKIP_EXISTING         Skip a run if metrics.json already exists. Default: 1
@@ -45,6 +46,7 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/business_matrix_${RUN_TAG}}"
 MAX_LENGTH="${MAX_LENGTH:-2048}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
+EXPECTED_FBETA_BETA="${EXPECTED_FBETA_BETA:-0.3}"
 PRECISION="${PRECISION:-fp16}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 INSTRUCTION="${INSTRUCTION:-Given a user query, retrieve relevant documents that answer the query.}"
@@ -161,6 +163,7 @@ run_one() {
     --gt_doc_id_col "${gt_doc_id_col}" \
     --max_length "${MAX_LENGTH}" \
     --batch_size "${BATCH_SIZE}" \
+    --expected_fbeta_beta "${EXPECTED_FBETA_BETA}" \
     --top_k_list "${TOP_K_ARGS[@]}" \
     "${precision_args[@]}" \
     "${attn_args[@]}"

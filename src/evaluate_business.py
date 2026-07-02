@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from data import format_input_text, record_to_doc, write_jsonl
 from modeling import DEFAULT_MODEL_NAME, load_scorer, torch
 
@@ -54,6 +56,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--top_k_list", type=int, nargs="+", default=[1, 3, 5, 10])
+    parser.add_argument(
+        "--expected_fbeta_beta",
+        type=float,
+        default=0.3,
+        help="Beta used to choose the dynamic cutoff from normalized score prefix sums.",
+    )
     parser.add_argument("--attn_implementation", default=None)
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
@@ -318,12 +326,45 @@ def join_ids(values: list[str]) -> str:
     return "，".join(values)
 
 
+def format_score(score: float) -> str:
+    return f"{float(score):.6f}"
+
+
+def join_id_scores(preds: list[dict[str, Any]]) -> str:
+    return "，".join(f"{pred['doc_id']}:{format_score(float(pred['score']))}" for pred in preds)
+
+
+def choose_expected_fbeta_best_k(
+    score_list: list[float],
+    beta: float,
+) -> tuple[int, float]:
+    if not score_list:
+        return 0, 0.0
+    scores = np.asarray(score_list, dtype=np.float64)
+    norm_scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
+    cum_gain = np.cumsum(norm_scores)
+    total_sum = float(cum_gain[-1]) if len(cum_gain) else 0.0
+    k_array = np.arange(1, len(scores) + 1, dtype=np.float64)
+    expected_fbeta = (1 + beta**2) * cum_gain / (beta**2 * total_sum + k_array)
+    best_idx = int(np.argmax(expected_fbeta))
+    return best_idx + 1, float(expected_fbeta[best_idx])
+
+
 SUMMARY_COLUMNS = [
     "query",
     "PageId",
     "正确标签数量",
     "召回候选数量",
     "模型召回的ID",
+    "模型召回ID和分数",
+    "BestK@ExpectedFbeta",
+    "ExpectedFbeta@BestK",
+    "BestK截断ID",
+    "BestK截断ID和分数",
+    "Precision@BestK",
+    "Recall@BestK",
+    "F1@BestK",
+    "HitRate@BestK",
     "命中ID",
     "漏召ID",
     "命中数量",
@@ -337,6 +378,7 @@ def compute_business_metrics(
     ground_truth: dict[str, GroundTruthItem],
     top_k_list: list[int],
     seconds_per_example: float,
+    expected_fbeta_beta: float,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for pred in ranked_predictions:
@@ -351,6 +393,8 @@ def compute_business_metrics(
     accuracy_sum = 0.0
     total_hits_at_label_count = 0
     total_gt_docs = 0
+    best_k_sum = 0.0
+    expected_fbeta_sum = 0.0
 
     for query, gt_item in ground_truth.items():
         gt_doc_ids = gt_item.doc_id_set
@@ -364,6 +408,21 @@ def compute_business_metrics(
         hits_at_label_count = len(set(model_top_ids) & gt_doc_ids)
         accuracy_at_label_count = hits_at_label_count / label_count if label_count else 0.0
         estimated_query_time = len(preds) * seconds_per_example
+        score_list = [float(pred["score"]) for pred in preds]
+        best_k, expected_fbeta_at_best_k = choose_expected_fbeta_best_k(
+            score_list,
+            beta=expected_fbeta_beta,
+        )
+        dynamic_top_preds = preds[:best_k]
+        dynamic_top_ids = [str(pred["doc_id"]) for pred in dynamic_top_preds]
+        dynamic_hits = len(set(dynamic_top_ids) & gt_doc_ids)
+        dynamic_precision = dynamic_hits / len(dynamic_top_ids) if dynamic_top_ids else 0.0
+        dynamic_recall = dynamic_hits / len(gt_doc_ids) if gt_doc_ids else 0.0
+        dynamic_f1 = (
+            0.0
+            if dynamic_precision + dynamic_recall == 0
+            else 2 * dynamic_precision * dynamic_recall / (dynamic_precision + dynamic_recall)
+        )
 
         row: dict[str, Any] = {
             "query": query,
@@ -371,6 +430,15 @@ def compute_business_metrics(
             "正确标签数量": label_count,
             "召回候选数量": len(preds),
             "模型召回的ID": join_ids(model_top_ids),
+            "模型召回ID和分数": join_id_scores(model_top_by_label_count),
+            "BestK@ExpectedFbeta": best_k,
+            "ExpectedFbeta@BestK": expected_fbeta_at_best_k,
+            "BestK截断ID": join_ids(dynamic_top_ids),
+            "BestK截断ID和分数": join_id_scores(dynamic_top_preds),
+            "Precision@BestK": dynamic_precision,
+            "Recall@BestK": dynamic_recall,
+            "F1@BestK": dynamic_f1,
+            "HitRate@BestK": 1.0 if dynamic_hits > 0 else 0.0,
             "命中ID": join_ids(hit_ids),
             "漏召ID": join_ids(missed_ids),
             "命中数量": hits_at_label_count,
@@ -396,10 +464,18 @@ def compute_business_metrics(
         accuracy_sum += accuracy_at_label_count
         total_hits_at_label_count += hits_at_label_count
         total_gt_docs += label_count
+        best_k_sum += best_k
+        expected_fbeta_sum += expected_fbeta_at_best_k
 
     denom = max(1, len(per_query_rows))
+    metrics["expected_fbeta_beta"] = expected_fbeta_beta
     metrics["Accuracy@GTCount"] = accuracy_sum / denom
     metrics["MicroAccuracy@GTCount"] = total_hits_at_label_count / total_gt_docs if total_gt_docs else 0.0
+    metrics["AvgBestK@ExpectedFbeta"] = best_k_sum / denom
+    metrics["ExpectedFbeta@BestK"] = expected_fbeta_sum / denom
+    for name in ("Precision", "Recall", "F1", "HitRate"):
+        key = f"{name}@BestK"
+        metrics[key] = sum(float(row[key]) for row in per_query_rows) / denom
     metrics["total_gt_docs"] = total_gt_docs
     metrics["total_hits_at_gt_count"] = total_hits_at_label_count
     metrics["MRR"] = sum(float(row["MRR"]) for row in per_query_rows) / denom
@@ -504,6 +580,7 @@ def main() -> None:
         ground_truth,
         args.top_k_list,
         seconds_per_example=sec_per_example,
+        expected_fbeta_beta=args.expected_fbeta_beta,
     )
     metrics.update(
         {
@@ -514,6 +591,7 @@ def main() -> None:
             "gt_doc_id_col": args.gt_doc_id_col,
             "max_length": args.max_length,
             "batch_size": args.batch_size,
+            "expected_fbeta_beta": args.expected_fbeta_beta,
             "precision": "bf16" if args.bf16 else "fp16" if args.fp16 else "fp32",
             "attn_implementation": args.attn_implementation or "",
             "score_time_seconds": float(score_time),

@@ -7,6 +7,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-outputs/business_eval}"
 MODEL_PATH="${MODEL_PATH:-outputs/qwen3_reranker_06b_lora/best}"
 MAX_LENGTH="${MAX_LENGTH:-2048}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
+EXPECTED_FBETA_BETA="${EXPECTED_FBETA_BETA:-0.3}"
 PRECISION="${PRECISION:-fp16}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 INSTRUCTION="${INSTRUCTION:-Given a user query, retrieve relevant documents that answer the query.}"
@@ -31,6 +32,7 @@ python src/evaluate_business.py \
   --instruction "${INSTRUCTION}" \
   --max_length "${MAX_LENGTH}" \
   --batch_size "${BATCH_SIZE}" \
+  --expected_fbeta_beta "${EXPECTED_FBETA_BETA}" \
   "${PRECISION_ARGS[@]}" \
   "${ATTN_ARGS[@]}" \
   "$@"
