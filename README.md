@@ -457,6 +457,33 @@ Per-query outputs include `BestK@ExpectedFbeta`, `ExpectedFbeta@BestK`,
 Business metrics are averaged over all ground-truth queries, so a query with no
 matched recalled docs contributes zero instead of silently disappearing.
 
+To recompute the dynamic cutoff and real F1 for multiple beta values from
+existing `predictions.jsonl` files without rerunning model inference:
+
+```bash
+OUTPUT_ROOT=outputs/business_matrix_xxx \
+bash scripts/recompute_beta_f1.sh
+```
+
+The default beta list is:
+
+```text
+1.0 0.7 0.5 0.3 0.2
+```
+
+Outputs are written under `OUTPUT_ROOT`:
+
+```text
+beta_f1_matrix.xlsx
+beta_f1_matrix_summary.csv
+beta_f1_matrix_summary.json
+beta_f1_matrix_per_query.jsonl
+```
+
+Each run directory also gets `beta_f1.xlsx`, `beta_f1_summary.csv`, and
+`beta_f1_per_query.csv`. The summary columns follow the mentor-style report:
+`avg_selected_count`, `avg_precision`, `avg_recall`, and `avg_f1`.
+
 ### Business Evaluation Matrix
 
 To compare the three business datasets across the five local models requested
