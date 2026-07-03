@@ -6,7 +6,9 @@ import gc
 import json
 import logging
 import math
+import os
 import re
+import subprocess
 import time
 
 from collections import defaultdict
@@ -516,6 +518,95 @@ def write_summary_xlsx(path: Path, rows: list[dict[str, Any]]) -> bool:
     return True
 
 
+def bytes_to_mib(value: int | float) -> float:
+    return float(value) / (1024.0**2)
+
+
+def get_torch_cuda_memory_mib() -> dict[str, Any]:
+    if torch is None or not torch.cuda.is_available():
+        return {
+            "cuda_available": False,
+            "cuda_device_index": "",
+            "cuda_device_name": "",
+            "cuda_current_allocated_mib": 0.0,
+            "cuda_current_reserved_mib": 0.0,
+            "cuda_peak_allocated_mib": 0.0,
+            "cuda_peak_reserved_mib": 0.0,
+        }
+    torch.cuda.synchronize()
+    device_index = torch.cuda.current_device()
+    return {
+        "cuda_available": True,
+        "cuda_device_index": int(device_index),
+        "cuda_device_name": torch.cuda.get_device_name(device_index),
+        "cuda_current_allocated_mib": bytes_to_mib(torch.cuda.memory_allocated(device_index)),
+        "cuda_current_reserved_mib": bytes_to_mib(torch.cuda.memory_reserved(device_index)),
+        "cuda_peak_allocated_mib": bytes_to_mib(torch.cuda.max_memory_allocated(device_index)),
+        "cuda_peak_reserved_mib": bytes_to_mib(torch.cuda.max_memory_reserved(device_index)),
+    }
+
+
+def resolve_visible_gpu_identifier(torch_device_index: Any) -> str:
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible_devices:
+        visible = [item.strip() for item in visible_devices.split(",") if item.strip()]
+        if isinstance(torch_device_index, int) and 0 <= torch_device_index < len(visible):
+            return visible[torch_device_index]
+    return str(torch_device_index) if torch_device_index != "" else ""
+
+
+def get_nvidia_smi_memory_mib() -> dict[str, Any]:
+    torch_memory = get_torch_cuda_memory_mib()
+    target_gpu = resolve_visible_gpu_identifier(torch_memory["cuda_device_index"])
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,uuid,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return {
+            "nvidia_smi_gpu_index": "",
+            "nvidia_smi_gpu_uuid": "",
+            "nvidia_smi_memory_used_mib": 0.0,
+            "nvidia_smi_memory_total_mib": 0.0,
+        }
+
+    rows = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if not rows:
+        return {
+            "nvidia_smi_gpu_index": "",
+            "nvidia_smi_gpu_uuid": "",
+            "nvidia_smi_memory_used_mib": 0.0,
+            "nvidia_smi_memory_total_mib": 0.0,
+        }
+    parsed_rows = [[part.strip() for part in row.split(",")] for row in rows]
+    selected = parsed_rows[0]
+    for row in parsed_rows:
+        if len(row) >= 4 and target_gpu and target_gpu in {row[0], row[1]}:
+            selected = row
+            break
+    if len(selected) < 4:
+        return {
+            "nvidia_smi_gpu_index": "",
+            "nvidia_smi_gpu_uuid": "",
+            "nvidia_smi_memory_used_mib": 0.0,
+            "nvidia_smi_memory_total_mib": 0.0,
+        }
+    return {
+        "nvidia_smi_gpu_index": selected[0],
+        "nvidia_smi_gpu_uuid": selected[1],
+        "nvidia_smi_memory_used_mib": float(selected[2]),
+        "nvidia_smi_memory_total_mib": float(selected[3]),
+    }
+
+
 def cleanup_cuda_memory() -> None:
     gc.collect()
     if torch is not None and torch.cuda.is_available():
@@ -550,6 +641,12 @@ def main() -> None:
     if not input_texts:
         raise ValueError("No query-document pairs to score after matching recall data to ground truth.")
 
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+    memory_before_load = get_torch_cuda_memory_mib()
+    nvidia_smi_before_load = get_nvidia_smi_memory_mib()
+
     scorer = load_scorer(
         args.model_path,
         max_length=args.max_length,
@@ -558,6 +655,8 @@ def main() -> None:
         mock=args.mock,
         attn_implementation=args.attn_implementation,
     )
+    memory_after_load = get_torch_cuda_memory_mib()
+    nvidia_smi_after_load = get_nvidia_smi_memory_mib()
 
     logger.info(
         "Scoring %d business query-document pairs with Qwen3 standard reranker prompt",
@@ -568,6 +667,8 @@ def main() -> None:
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(input_texts))
     examples_per_sec = len(input_texts) / score_time if score_time > 0 else 0.0
+    memory_after_score = get_torch_cuda_memory_mib()
+    nvidia_smi_after_score = get_nvidia_smi_memory_mib()
 
     ranked_predictions = attach_scores_and_ranks(
         mapping,
@@ -598,6 +699,29 @@ def main() -> None:
             "seconds_per_example": float(sec_per_example),
             "examples_per_second": float(examples_per_sec),
             "skipped_recall_queries_without_gt": skipped_queries,
+            "cuda_available": memory_after_score["cuda_available"],
+            "cuda_device_index": memory_after_score["cuda_device_index"],
+            "cuda_device_name": memory_after_score["cuda_device_name"],
+            "cuda_before_load_allocated_mib": memory_before_load["cuda_current_allocated_mib"],
+            "cuda_before_load_reserved_mib": memory_before_load["cuda_current_reserved_mib"],
+            "cuda_after_load_allocated_mib": memory_after_load["cuda_current_allocated_mib"],
+            "cuda_after_load_reserved_mib": memory_after_load["cuda_current_reserved_mib"],
+            "cuda_after_score_allocated_mib": memory_after_score["cuda_current_allocated_mib"],
+            "cuda_after_score_reserved_mib": memory_after_score["cuda_current_reserved_mib"],
+            "cuda_peak_allocated_mib": memory_after_score["cuda_peak_allocated_mib"],
+            "cuda_peak_reserved_mib": memory_after_score["cuda_peak_reserved_mib"],
+            "nvidia_smi_before_load_gpu_index": nvidia_smi_before_load["nvidia_smi_gpu_index"],
+            "nvidia_smi_before_load_gpu_uuid": nvidia_smi_before_load["nvidia_smi_gpu_uuid"],
+            "nvidia_smi_before_load_memory_used_mib": nvidia_smi_before_load["nvidia_smi_memory_used_mib"],
+            "nvidia_smi_before_load_memory_total_mib": nvidia_smi_before_load["nvidia_smi_memory_total_mib"],
+            "nvidia_smi_after_load_gpu_index": nvidia_smi_after_load["nvidia_smi_gpu_index"],
+            "nvidia_smi_after_load_gpu_uuid": nvidia_smi_after_load["nvidia_smi_gpu_uuid"],
+            "nvidia_smi_after_load_memory_used_mib": nvidia_smi_after_load["nvidia_smi_memory_used_mib"],
+            "nvidia_smi_after_load_memory_total_mib": nvidia_smi_after_load["nvidia_smi_memory_total_mib"],
+            "nvidia_smi_after_score_gpu_index": nvidia_smi_after_score["nvidia_smi_gpu_index"],
+            "nvidia_smi_after_score_gpu_uuid": nvidia_smi_after_score["nvidia_smi_gpu_uuid"],
+            "nvidia_smi_after_score_memory_used_mib": nvidia_smi_after_score["nvidia_smi_memory_used_mib"],
+            "nvidia_smi_after_score_memory_total_mib": nvidia_smi_after_score["nvidia_smi_memory_total_mib"],
         }
     )
 
