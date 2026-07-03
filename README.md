@@ -514,21 +514,16 @@ also clears the CUDA cache after writing outputs. If a 4B run still OOMs, lower
 `BATCH_SIZE` first, then `MAX_LENGTH`; if memory is plentiful, raise
 `BATCH_SIZE` to improve throughput.
 
-`metrics.json` and matrix summary tables also record GPU memory fields for each
-run. The most useful ones are:
+`metrics.json` and matrix summary tables also record two PyTorch GPU peak
+memory fields for each run:
 
 ```text
 cuda_peak_allocated_mib       PyTorch tensor peak memory for this process
 cuda_peak_reserved_mib        PyTorch caching allocator peak reservation
-nvidia_smi_after_load_memory_used_mib
-nvidia_smi_after_score_memory_used_mib
 ```
 
-The `cuda_*` fields come from `torch.cuda` and describe the current Python
-process. The `nvidia_smi_*` fields describe the visible GPU reported by
-`nvidia-smi`, so they may include other processes on the same card. When
-`CUDA_VISIBLE_DEVICES` is set, the script maps the current PyTorch device back
-to the matching `nvidia-smi` GPU index/UUID when possible.
+These fields describe the current Python process. `cuda_peak_reserved_mib` is
+usually the cleaner headline number for "how much GPU memory this run needed".
 
 ## Prediction
 
