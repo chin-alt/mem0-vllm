@@ -1,0 +1,10 @@
+ms-swift>=4.0.0
+transformers>=4.51.0
+peft>=0.11.0
+datasets>=3.0.0
+tqdm>=4.66.0
+numpy>=1.24.0,<2.0.0
+
+# Optional but recommended on CUDA Linux clusters:
+# deepspeed>=0.14.0
+# flash-attn

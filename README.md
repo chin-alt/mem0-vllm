@@ -364,6 +364,111 @@ python src/evaluate.py \
   --fp16
 ```
 
+## Train With ms-swift Native Listwise Reranker
+
+This repository also provides an ms-swift route for Qwen3-Reranker listwise
+training. It follows the native Swift reranker API:
+
+```text
+swift sft --task_type generative_reranker --loss_type listwise_reranker
+```
+
+Install Swift dependencies on the Linux training machine:
+
+```bash
+pip install -r requirements-swift.txt
+```
+
+ms-swift's native listwise loss is not the same as the custom soft-label KL
+loss above. Swift expects one query with positive and negative documents, then
+optimizes a group cross-entropy objective. The exporter maps your soft labels
+to that format:
+
+```text
+labels / 10 >= POSITIVE_THRESHOLD  -> positive_messages
+labels / 10 <  POSITIVE_THRESHOLD  -> negative_messages
+```
+
+If a query has no document above the threshold, the highest-scored document is
+used as the positive by default (`POSITIVE_STRATEGY=threshold_or_top1`). The
+exported format is:
+
+```json
+{
+  "messages": [
+    {"role": "system", "content": "instruction"},
+    {"role": "user", "content": "query"}
+  ],
+  "positive_messages": [[{"role": "assistant", "content": "relevant doc"}]],
+  "negative_messages": [[{"role": "assistant", "content": "irrelevant doc"}]]
+}
+```
+
+Run 0.6B Swift-native listwise LoRA:
+
+```bash
+TRAIN_FILE=data/split_seed42/train.jsonl \
+DEV_FILE=data/split_seed42/dev.jsonl \
+MODEL_NAME_OR_PATH=/home/c50061497/MemOS/src/memos/reranker/memranker/models/Qwen3-Reranker-0.6B \
+OUTPUT_DIR=outputs/qwen3_reranker_06b_swift_listwise_lora \
+SWIFT_DATA_DIR=data/swift_listwise_seed42_06b \
+MAX_LENGTH=2048 \
+PER_DEVICE_TRAIN_BATCH_SIZE=1 \
+GRAD_ACCUM=8 \
+bash scripts/train_qwen3_reranker_swift_listwise.sh
+```
+
+Run 4B on 8 RTX 3090 GPUs:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+TRAIN_FILE=data/split_seed42/train.jsonl \
+DEV_FILE=data/split_seed42/dev.jsonl \
+MODEL_NAME_OR_PATH=/home/c50061497/MemOS/src/memos/reranker/memranker/models/Qwen3-Reranker-4B \
+OUTPUT_DIR=outputs/qwen3_reranker_4b_8x3090_swift_listwise_lora \
+SWIFT_DATA_DIR=data/swift_listwise_seed42_4b \
+MAX_LENGTH=2048 \
+PER_DEVICE_TRAIN_BATCH_SIZE=1 \
+GRAD_ACCUM=8 \
+DEEPSPEED=zero2 \
+TORCH_DTYPE=float16 \
+ATTN_IMPL=flash_attn \
+bash scripts/train_qwen3_reranker_swift_listwise.sh
+```
+
+Useful Swift-native knobs:
+
+- `POSITIVE_THRESHOLD=0.7` controls soft-score to positive/negative conversion.
+- `MAX_POSITIVE_SAMPLES=1` and `MAX_NEGATIVE_SAMPLES=7` are consumed by ms-swift during listwise group construction.
+- `LISTWISE_RERANKER_TEMPERATURE=1.0` controls Swift's listwise softmax temperature.
+- `ATTN_IMPL=flash_attn` plus `PADDING_FREE=true` is the recommended fast path; if flash-attn is unavailable, set `ATTN_IMPL=eager PADDING_FREE=false`.
+- `USE_HF=true` makes Swift download from Hugging Face instead of ModelScope; local model paths work without network.
+
+The wrapper first writes Swift JSONL files under `SWIFT_DATA_DIR`, then starts
+`swift sft`. Swift checkpoints are written under `OUTPUT_DIR`, usually as a
+versioned directory containing `checkpoint-*`. You can evaluate a Swift LoRA
+checkpoint with the existing evaluator if the checkpoint contains PEFT
+`adapter_config.json`:
+
+```bash
+python src/evaluate.py \
+  --model_path outputs/qwen3_reranker_4b_8x3090_swift_listwise_lora/vx-xxx/checkpoint-xxx \
+  --test_file data/split_seed42/test.jsonl \
+  --output_dir outputs/swift_listwise_eval \
+  --max_length 2048 \
+  --attn_implementation flash_attention_2 \
+  --fp16
+```
+
+Or merge LoRA with Swift before deployment:
+
+```bash
+swift export \
+  --adapters outputs/qwen3_reranker_4b_8x3090_swift_listwise_lora/vx-xxx/checkpoint-xxx \
+  --merge_lora true
+```
+
 ## Finetuned Evaluation
 
 Use the same fixed test split:
