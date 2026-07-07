@@ -172,6 +172,11 @@ def compute_listwise_loss(
     model_temperature: float,
     loss_type: str,
 ) -> Any:
+    """Compute listwise loss from raw yes-minus-no logits.
+
+    Do not pass sigmoid probabilities here. The model distribution should be
+    formed from unbounded logits with log_softmax.
+    """
     if torch is None:
         raise RuntimeError("torch is required for listwise loss")
     if teacher_temperature <= 0 or model_temperature <= 0:

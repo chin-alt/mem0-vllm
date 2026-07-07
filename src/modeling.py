@@ -246,6 +246,8 @@ if torch is not None:
                 last_logits = outputs.logits[batch_indices, last_indices, :]
             yes_logits = last_logits[:, self.yes_token_id]
             no_logits = last_logits[:, self.no_token_id]
+            # Raw relevance logit used for BCE/listwise training. Sigmoid is
+            # applied only in prediction helpers that need a 0-1 score.
             logits = yes_logits - no_logits
             result = {"logits": logits}
             if labels is not None:
