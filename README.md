@@ -301,6 +301,69 @@ to the script command line:
 bash scripts/train_qwen3_reranker_4b_8x3090.sh --load_in_4bit
 ```
 
+## Train Listwise Soft Labels
+
+Pointwise training treats each query-document pair independently with BCE. The
+listwise variant groups all documents for the same query, builds a teacher
+distribution from the soft labels, and trains the model distribution over the
+documents in that query group:
+
+```text
+teacher_probs = softmax((labels / 10) / teacher_temperature)
+model_probs   = softmax((logit_yes - logit_no) / model_temperature)
+loss          = KL(teacher_probs || model_probs)
+```
+
+This is useful when you want the model to learn relative ranking inside each
+query list instead of only matching independent scores.
+
+Run 0.6B LoRA listwise training:
+
+```bash
+TRAIN_FILE=data/split_seed42/train.jsonl \
+DEV_FILE=data/split_seed42/dev.jsonl \
+TEST_FILE=data/split_seed42/test.jsonl \
+MODEL_NAME_OR_PATH=/path/to/Qwen3-Reranker-0.6B \
+OUTPUT_DIR=outputs/qwen3_reranker_06b_listwise_lora \
+MAX_LENGTH=2048 \
+GROUP_BATCH_SIZE=1 \
+GRAD_ACCUM=8 \
+bash scripts/train_qwen3_reranker_listwise.sh
+```
+
+Run 4B on 8 RTX 3090 GPUs:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NUM_PROCESSES=8 \
+MODEL_NAME_OR_PATH=/home/c50061497/MemOS/src/memos/reranker/memranker/models/Qwen3-Reranker-4B \
+OUTPUT_DIR=outputs/qwen3_reranker_4b_8x3090_listwise_lora \
+MAX_LENGTH=2048 \
+GROUP_BATCH_SIZE=1 \
+GRAD_ACCUM=8 \
+bash scripts/train_qwen3_reranker_listwise.sh
+```
+
+Important listwise knobs:
+
+- `TEACHER_SCORE_SCALE=normalized` uses `labels / 10`; use `raw` for 0-10 labels.
+- `TEACHER_TEMPERATURE=1.0` controls how sharp the teacher distribution is.
+- `MAX_GROUP_SIZE=16` caps docs per query group for memory; use a smaller value if OOM.
+- `GROUP_TRUNCATION=input_order` preserves file order; `label_desc` keeps highest teacher labels first.
+- `LOSS_TYPE=kl` matches distribution distillation; `ce` gives the same gradient up to teacher entropy.
+
+Evaluate the saved adapter exactly like pointwise:
+
+```bash
+python src/evaluate.py \
+  --model_path outputs/qwen3_reranker_4b_8x3090_listwise_lora/best \
+  --test_file data/split_seed42/test.jsonl \
+  --output_dir outputs/listwise_eval \
+  --max_length 2048 \
+  --attn_implementation flash_attention_2 \
+  --fp16
+```
+
 ## Finetuned Evaluation
 
 Use the same fixed test split:
