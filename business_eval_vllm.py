@@ -43,33 +43,36 @@ QWEN3_RERANKER_HF_OVERRIDES = {
 }
 
 
-def build_qwen3_reranker_chat_template(instruction: str) -> str:
-    """Jinja chat template matching Qwen3-Reranker yes/no judgement style.
+QWEN3_RERANKER_PREFIX = (
+    '<|im_start|>system\n'
+    ' Judge whether the Document meets the requirements based on the Query and '
+    'the Instruct provided. Note that the answer can only be "yes" or "no".'
+    '<|im_end|>\n<|im_start|>user\n'
+)
+QWEN3_RERANKER_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
-    vLLM versions that support `chat_template` can use this with `LLM.score`.
-    If a vLLM build ignores or does not expose `chat_template`, the script logs
-    a warning and relies on the model/tokenizer built-in template.
+
+def format_qwen3_score_inputs(
+    queries: list[str],
+    documents: list[str],
+    instruction: str,
+) -> tuple[list[str], list[str]]:
+    """Format inputs as the official vLLM Qwen3-Reranker score example does.
+
+    vLLM 0.10.x documents Qwen3-Reranker with already formatted query/document
+    strings before calling ``llm.score``. Doing it explicitly here keeps the
+    script compatible with older vLLM builds that do not expose
+    ``LLM(..., chat_template=...)``.
     """
-    escaped_instruction = json.dumps(instruction, ensure_ascii=False)
-    return (
-        "{% set instruction = "
-        + escaped_instruction
-        + " %}\n"
-        "{% if messages is defined %}\n"
-        "{% for message in messages %}\n"
-        "{% if message['role'] == 'system' %}<|im_start|>system\n{{ message['content'] }}<|im_end|>\n"
-        "{% elif message['role'] == 'user' %}<|im_start|>user\n{{ message['content'] }}<|im_end|>\n"
-        "{% elif message['role'] == 'assistant' %}<|im_start|>assistant\n{{ message['content'] }}<|im_end|>\n"
-        "{% endif %}\n"
-        "{% endfor %}\n"
-        "{% elif query is defined and document is defined %}\n"
-        "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and "
-        'the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n'
-        "<|im_start|>user\n<Instruct>: {{ instruction }}\n<Query>: {{ query }}\n<Document>: {{ document }}<|im_end|>\n"
-        "{% endif %}\n"
-        "{% if add_generation_prompt is not defined or add_generation_prompt %}"
-        "<|im_start|>assistant\n<think>\n\n</think>\n\n{% endif %}"
-    )
+    formatted_queries = [
+        f"{QWEN3_RERANKER_PREFIX}<Instruct>: {instruction}\n<Query>: {query}\n"
+        for query in queries
+    ]
+    formatted_documents = [
+        f"<Document>: {document}{QWEN3_RERANKER_SUFFIX}"
+        for document in documents
+    ]
+    return formatted_queries, formatted_documents
 
 
 def parse_args() -> argparse.Namespace:
@@ -160,14 +163,8 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
         "max_num_batched_tokens": args.max_num_batched_tokens,
         "max_num_seqs": args.max_num_seqs,
         "enable_prefix_caching": args.enable_prefix_caching,
-        "chat_template": build_qwen3_reranker_chat_template(args.instruction),
     }
     filtered_kwargs = filter_supported_kwargs(LLM, llm_kwargs, context="LLM")
-    if "chat_template" not in filtered_kwargs:
-        logger.warning(
-            "This vLLM version does not expose LLM(..., chat_template=...). "
-            "Falling back to the model/tokenizer built-in template."
-        )
     logger.info("Initializing vLLM with kwargs: %s", json.dumps(_jsonable(filtered_kwargs), ensure_ascii=False))
     return LLM(**filtered_kwargs)
 
@@ -231,7 +228,6 @@ def extract_vllm_score(output: Any) -> float:
 def build_score_call_kwargs(llm: Any, instruction: str) -> dict[str, Any]:
     requested_kwargs = {
         "use_tqdm": False,
-        "instruction": instruction,
     }
     return filter_supported_kwargs(llm.score, requested_kwargs, context="LLM.score")
 
@@ -273,7 +269,12 @@ def score_with_vllm(
         batch = indexed[start : start + batch_size]
         batch_queries = [item[1] for item in batch]
         batch_documents = [item[2] for item in batch]
-        outputs = llm.score(batch_queries, batch_documents, **score_kwargs)
+        formatted_queries, formatted_documents = format_qwen3_score_inputs(
+            batch_queries,
+            batch_documents,
+            instruction=instruction,
+        )
+        outputs = llm.score(formatted_queries, formatted_documents, **score_kwargs)
         if len(outputs) != len(batch):
             raise ValueError(f"vLLM returned {len(outputs)} outputs for {len(batch)} input pairs")
         for (original_idx, _, _, _), output in zip(batch, outputs, strict=True):
