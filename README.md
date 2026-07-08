@@ -379,6 +379,25 @@ Install Swift dependencies on the Linux training machine:
 pip install -r requirements-swift.txt
 ```
 
+Version note: this script needs an ms-swift version that exposes
+`--task_type generative_reranker` and `--loss_type listwise_reranker`.
+ms-swift 2.6.1 is too old for this native reranker path. Its
+`swift sft --help` exposes older arguments such as `--model_id_or_path`,
+`--sft_type`, `--dtype`, and `--use_flash_attn`, but not the native reranker
+task/loss arguments. If you see an error like `ambiguous option: --model could
+match --model_type, --model_id_or_path...`, upgrade ms-swift:
+
+```bash
+pip uninstall -y ms-swift swift
+pip install "ms-swift==3.12.6" --upgrade --upgrade-strategy only-if-needed
+swift sft --help | grep -E "task_type|loss_type|train_type|tuner_type|--model "
+```
+
+For `torch==2.5.1`, prefer `ms-swift==3.12.6`. ms-swift 4.x imports PyTorch's
+newer FSDP2 `FSDPModule`, which is not available in torch 2.5.1. Swift 3.12.x
+uses `--train_type lora`; Swift 4.x uses `--tuner_type lora`; Swift 2.x used
+`--sft_type lora`. The helper script detects these names automatically.
+
 ms-swift's native listwise loss is not the same as the custom soft-label KL
 loss above. Swift expects one query with positive and negative documents, then
 optimizes a group cross-entropy objective. The exporter maps your soft labels
@@ -719,6 +738,54 @@ cuda_peak_reserved_mib        PyTorch caching allocator peak reservation
 
 These fields describe the current Python process. `cuda_peak_reserved_mib` is
 usually the cleaner headline number for "how much GPU memory this run needed".
+
+### vLLM Business Evaluation
+
+For faster offline scoring with Qwen3-Reranker sequence-classification support,
+use the independent vLLM evaluator. It keeps the same ground-truth parsing,
+recall parsing, metrics, and output filenames as `src/evaluate_business.py`, but
+replaces the local Transformers scorer with `LLM(..., runner="pooling").score()`.
+
+Install vLLM dependencies on the Linux GPU machine:
+
+```bash
+pip install -r requirements-vllm.txt
+```
+
+Single run:
+
+```bash
+python business_eval_vllm.py \
+  --gt_file data/business/ground_truth.xlsx \
+  --recall_file data/business/recall.json \
+  --model_path /home/c50061497/MemOS/src/memos/reranker/memranker/models/Qwen3-Reranker-4B \
+  --output_dir outputs/business_eval_vllm_2048_bs256 \
+  --max_length 2048 \
+  --batch_size 256 \
+  --dtype bfloat16 \
+  --gpu_memory_utilization 0.90 \
+  --tensor_parallel_size 1 \
+  --max_num_batched_tokens 32768 \
+  --max_num_seqs 256 \
+  --sort_by_length
+```
+
+Run the same 5-model x 3-dataset matrix with vLLM:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+MAX_LENGTH=2048 \
+BATCH_SIZE=256 \
+DTYPE=bfloat16 \
+GPU_MEMORY_UTILIZATION=0.90 \
+TENSOR_PARALLEL_SIZE=1 \
+bash scripts/eval_business_matrix_vllm.sh
+```
+
+The vLLM matrix writes the same per-run files plus
+`summary_metrics.{xlsx,csv,json}`. vLLM generally expects a full model
+directory; if a LoRA output is adapter-only, merge it first or expect that
+matrix row to fail.
 
 ## Prediction
 

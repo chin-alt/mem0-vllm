@@ -16,6 +16,8 @@ BASE_COLUMNS = [
     "model",
     "run_name",
     "output_dir",
+    "backend",
+    "vllm_runner",
     "model_path",
     "gt_file",
     "recall_file",
@@ -24,7 +26,13 @@ BASE_COLUMNS = [
     "batch_size",
     "expected_fbeta_beta",
     "precision",
+    "dtype",
     "attn_implementation",
+    "gpu_memory_utilization",
+    "tensor_parallel_size",
+    "max_num_batched_tokens",
+    "max_num_seqs",
+    "sort_by_length",
 ]
 METRIC_COLUMNS = [
     "num_gt_queries",
