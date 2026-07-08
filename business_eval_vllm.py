@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 import numpy as np
 from tqdm.auto import tqdm
+from packaging.version import Version
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -41,6 +42,11 @@ QWEN3_RERANKER_HF_OVERRIDES = {
     "classifier_from_token": ["no", "yes"],
     "is_original_qwen3_reranker": True,
 }
+
+MIN_TRANSFORMERS_FOR_VLLM_0102 = "4.55.2"
+MAX_TRANSFORMERS_FOR_VLLM_0102 = "5.0.0"
+MIN_TOKENIZERS_FOR_VLLM_0102 = "0.21.1"
+MAX_TOKENIZERS_FOR_VLLM_0102 = "0.22.0"
 
 
 QWEN3_RERANKER_PREFIX = (
@@ -144,6 +150,8 @@ def filter_supported_kwargs(
 
 def create_vllm_llm(args: argparse.Namespace) -> Any:
     try:
+        import tokenizers
+        import transformers
         from vllm import LLM
         import vllm
     except ImportError as exc:
@@ -151,6 +159,28 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
             "business_eval_vllm.py requires vLLM. Install it on the Linux GPU "
             "machine with: pip install -r requirements-vllm.txt"
         ) from exc
+    if Version(transformers.__version__) < Version(MIN_TRANSFORMERS_FOR_VLLM_0102):
+        raise RuntimeError(
+            f"transformers=={transformers.__version__} is too old for vllm==0.10.2. "
+            f"Please upgrade to transformers>={MIN_TRANSFORMERS_FOR_VLLM_0102}. "
+            "The Qwen2Tokenizer all_special_tokens_extended error is caused by this mismatch."
+        )
+    if Version(transformers.__version__) >= Version(MAX_TRANSFORMERS_FOR_VLLM_0102):
+        raise RuntimeError(
+            f"transformers=={transformers.__version__} is too new for vllm==0.10.2. "
+            "Please use transformers>=4.55.2,<5.0.0 in the dedicated vLLM eval environment. "
+            "The Qwen2Tokenizer all_special_tokens_extended error is caused by this mismatch."
+        )
+    if Version(tokenizers.__version__) < Version(MIN_TOKENIZERS_FOR_VLLM_0102):
+        raise RuntimeError(
+            f"tokenizers=={tokenizers.__version__} is too old for vllm==0.10.2. "
+            f"Please upgrade to tokenizers>={MIN_TOKENIZERS_FOR_VLLM_0102}."
+        )
+    if Version(tokenizers.__version__) >= Version(MAX_TOKENIZERS_FOR_VLLM_0102):
+        raise RuntimeError(
+            f"tokenizers=={tokenizers.__version__} is too new for vllm==0.10.2. "
+            "Please use tokenizers>=0.21.1,<0.22.0 in the dedicated vLLM eval environment."
+        )
 
     llm_kwargs: dict[str, Any] = {
         "model": args.model_path,

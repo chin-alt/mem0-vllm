@@ -762,6 +762,19 @@ uv pip install \
 uv pip install -r requirements-vllm.txt --torch-backend=cu128
 ```
 
+If vLLM fails during tokenizer initialization with
+`Qwen2Tokenizer has no attribute all_special_tokens_extended`, the environment
+has an incompatible Transformers stack. `vllm==0.10.2` should use the
+Transformers 4.x stack, not Transformers 5.x. Reinstall the vLLM-side
+dependencies in the dedicated eval environment:
+
+```bash
+uv pip install --upgrade --force-reinstall \
+  "transformers>=4.55.2,<5.0.0" \
+  "tokenizers>=0.21.1,<0.22.0" \
+  "sentencepiece>=0.2.0"
+```
+
 Single run:
 
 ```bash
