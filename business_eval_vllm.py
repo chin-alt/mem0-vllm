@@ -61,8 +61,7 @@ def format_qwen3_score_inputs(
 
     vLLM 0.10.x documents Qwen3-Reranker with already formatted query/document
     strings before calling ``llm.score``. Doing it explicitly here keeps the
-    script compatible with older vLLM builds that do not expose
-    ``LLM(..., chat_template=...)``.
+    scorer aligned with the official yes/no reranker prompt.
     """
     formatted_queries = [
         f"{QWEN3_RERANKER_PREFIX}<Instruct>: {instruction}\n<Query>: {query}\n"
@@ -146,10 +145,11 @@ def filter_supported_kwargs(
 def create_vllm_llm(args: argparse.Namespace) -> Any:
     try:
         from vllm import LLM
+        import vllm
     except ImportError as exc:
         raise RuntimeError(
             "business_eval_vllm.py requires vLLM. Install it on the Linux GPU "
-            "machine with a command such as: pip install vllm"
+            "machine with: pip install -r requirements-vllm.txt"
         ) from exc
 
     llm_kwargs: dict[str, Any] = {
@@ -165,8 +165,15 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
         "enable_prefix_caching": args.enable_prefix_caching,
     }
     filtered_kwargs = filter_supported_kwargs(LLM, llm_kwargs, context="LLM")
+    if filtered_kwargs.get("runner") != "pooling":
+        raise RuntimeError(
+            "This evaluator requires vLLM with LLM(..., runner='pooling'), "
+            "which is supported by vllm==0.10.2. Please install requirements-vllm.txt."
+        )
     logger.info("Initializing vLLM with kwargs: %s", json.dumps(_jsonable(filtered_kwargs), ensure_ascii=False))
-    return LLM(**filtered_kwargs)
+    llm = LLM(**filtered_kwargs)
+    setattr(llm, "_memranker_vllm_version", getattr(vllm, "__version__", "unknown"))
+    return llm
 
 
 def _jsonable(value: Any) -> Any:
@@ -365,6 +372,7 @@ def main() -> None:
         {
             "backend": "vllm",
             "vllm_runner": "pooling",
+            "vllm_version": getattr(llm, "_memranker_vllm_version", "unknown"),
             "dtype": args.dtype,
             "gpu_memory_utilization": args.gpu_memory_utilization,
             "tensor_parallel_size": args.tensor_parallel_size,

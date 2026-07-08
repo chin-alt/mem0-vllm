@@ -744,12 +744,22 @@ usually the cleaner headline number for "how much GPU memory this run needed".
 For faster offline scoring with Qwen3-Reranker sequence-classification support,
 use the independent vLLM evaluator. It keeps the same ground-truth parsing,
 recall parsing, metrics, and output filenames as `src/evaluate_business.py`, but
-replaces the local Transformers scorer with `LLM(..., runner="pooling").score()`.
+replaces the local Transformers scorer with `vllm==0.10.2`
+`LLM(..., runner="pooling").score()`.
 
 Install vLLM dependencies on the Linux GPU machine:
 
 ```bash
 pip install -r requirements-vllm.txt
+```
+
+For a CUDA 12.8 machine with torch 2.8.0, a clean environment can be prepared as:
+
+```bash
+uv pip install \
+  torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
+  --index-url https://download.pytorch.org/whl/cu128
+uv pip install -r requirements-vllm.txt --torch-backend=cu128
 ```
 
 Single run:
