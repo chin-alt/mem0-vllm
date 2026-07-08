@@ -796,19 +796,48 @@ python business_eval_vllm.py \
 Run the same 5-model x 3-dataset matrix with vLLM:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 \
+CUDA_VISIBLE_DEVICES=0,1 \
 MAX_LENGTH=2048 \
-BATCH_SIZE=256 \
-DTYPE=bfloat16 \
-GPU_MEMORY_UTILIZATION=0.90 \
-TENSOR_PARALLEL_SIZE=1 \
+BATCH_SIZE=64 \
+DTYPE=float16 \
+GPU_MEMORY_UTILIZATION=0.80 \
+TENSOR_PARALLEL_SIZE=2 \
+MAX_NUM_BATCHED_TOKENS=8192 \
+MAX_NUM_SEQS=64 \
 bash scripts/eval_business_matrix_vllm.sh
 ```
 
 The vLLM matrix writes the same per-run files plus
-`summary_metrics.{xlsx,csv,json}`. vLLM generally expects a full model
-directory; if a LoRA output is adapter-only, merge it first or expect that
-matrix row to fail.
+`summary_metrics.{xlsx,csv,json}`.
+
+vLLM expects `--model_path` to be a full Hugging Face model directory with
+`config.json`. A PEFT/LoRA adapter directory such as
+`outputs/qwen3_reranker_4b_8x3090_lora/best` only has `adapter_config.json`, so
+merge it once before running the vLLM evaluator:
+
+```bash
+python src/merge_lora.py \
+  --adapter_path outputs/qwen3_reranker_4b_8x3090_lora/best \
+  --base_model_path models/Qwen3-Reranker-4B \
+  --output_dir outputs/qwen3_reranker_4b_8x3090_lora_merged \
+  --torch_dtype float16 \
+  --overwrite
+
+python src/merge_lora.py \
+  --adapter_path outputs/qwen3_reranker_06b_lora/best \
+  --base_model_path models/Qwen3-Reranker-0.6B \
+  --output_dir outputs/qwen3_reranker_06b_lora_merged \
+  --torch_dtype float16 \
+  --overwrite
+```
+
+The vLLM matrix uses those merged paths by default. To use custom merged paths:
+
+```bash
+QWEN3_RERANKER_4B_LORA_PATH=/path/to/qwen3_4b_lora_merged \
+QWEN3_RERANKER_06B_LORA_PATH=/path/to/qwen3_06b_lora_merged \
+bash scripts/eval_business_matrix_vllm.sh
+```
 
 ## Prediction
 

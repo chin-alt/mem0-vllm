@@ -148,6 +148,35 @@ def filter_supported_kwargs(
     return supported
 
 
+def validate_vllm_model_path(model_path: str) -> None:
+    path = Path(model_path)
+    if not path.exists():
+        return
+    if path.is_file():
+        return
+
+    has_config = (path / "config.json").is_file() or (path / "params.json").is_file()
+    is_adapter_only = (path / "adapter_config.json").is_file() and not has_config
+    if is_adapter_only:
+        raise RuntimeError(
+            "vLLM cannot load a PEFT/LoRA adapter-only directory as --model_path. "
+            f"The path has adapter_config.json but no config.json: {path}\n"
+            "Merge the adapter into a full model first, for example:\n"
+            "python src/merge_lora.py \\\n"
+            f"  --adapter_path {path} \\\n"
+            "  --base_model_path /path/to/base/Qwen3-Reranker-4B \\\n"
+            f"  --output_dir {path.parent / (path.name + '_merged')} \\\n"
+            "  --torch_dtype float16 \\\n"
+            "  --overwrite\n"
+            "Then pass the merged output directory to business_eval_vllm.py."
+        )
+    if not has_config:
+        raise RuntimeError(
+            "vLLM expects --model_path to be a full Hugging Face model directory "
+            f"with config.json, but none was found in: {path}"
+        )
+
+
 def create_vllm_llm(args: argparse.Namespace) -> Any:
     try:
         import tokenizers
@@ -181,6 +210,7 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
             f"tokenizers=={tokenizers.__version__} is too new for vllm==0.10.2. "
             "Please use tokenizers>=0.21.1,<0.22.0 in the dedicated vLLM eval environment."
         )
+    validate_vllm_model_path(args.model_path)
 
     llm_kwargs: dict[str, Any] = {
         "model": args.model_path,

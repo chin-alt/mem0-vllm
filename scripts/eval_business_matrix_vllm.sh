@@ -35,8 +35,8 @@ Outputs:
   <OUTPUT_ROOT>/summary_metrics.json
 
 Notes:
-  vLLM generally expects a full model directory. PEFT/LoRA adapter-only paths may
-  need to be merged before this matrix can evaluate them with LLM.score().
+  vLLM expects a full model directory with config.json. PEFT/LoRA adapter-only
+  paths must be merged first, for example with src/merge_lora.py.
 EOF
 }
 
@@ -70,6 +70,8 @@ SKIP_EXISTING="${SKIP_EXISTING:-1}"
 CONTINUE_ON_ERROR="${CONTINUE_ON_ERROR:-0}"
 POST_RUN_SLEEP="${POST_RUN_SLEEP:-2}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+QWEN3_RERANKER_4B_LORA_PATH="${QWEN3_RERANKER_4B_LORA_PATH:-/home/c50061497/MemOS/src/memos/reranker/memranker/outputs/qwen3_reranker_4b_8x3090_lora_merged}"
+QWEN3_RERANKER_06B_LORA_PATH="${QWEN3_RERANKER_06B_LORA_PATH:-/home/c50061497/MemOS/src/memos/reranker/memranker/outputs/qwen3_reranker_06b_lora_merged}"
 
 MODEL_NAMES=(
   "memreranker_4b"
@@ -82,8 +84,8 @@ MODEL_PATHS=(
   "/home/c50061497/MemOS/src/memos/reranker/memranker/models/IAAR-Shanghai/MemReranker-4B"
   "/home/c50061497/MemOS/src/memos/reranker/memranker/models/Qwen3-Reranker-0.6B"
   "/home/c50061497/MemOS/src/memos/reranker/memranker/models/Qwen3-Reranker-4B"
-  "/home/c50061497/MemOS/src/memos/reranker/memranker/outputs/qwen3_reranker_4b_8x3090_lora/best"
-  "/home/c50061497/MemOS/src/memos/reranker/memranker/outputs/qwen3_reranker_06b_lora/best"
+  "${QWEN3_RERANKER_4B_LORA_PATH}"
+  "${QWEN3_RERANKER_06B_LORA_PATH}"
 )
 
 DATASET_NAMES=(
