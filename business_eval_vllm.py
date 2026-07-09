@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import math
+import shutil
 import sys
 import time
 
@@ -47,6 +48,8 @@ MIN_TRANSFORMERS_FOR_VLLM_0102 = "4.55.2"
 MAX_TRANSFORMERS_FOR_VLLM_0102 = "5.0.0"
 MIN_TOKENIZERS_FOR_VLLM_0102 = "0.21.1"
 MAX_TOKENIZERS_FOR_VLLM_0102 = "0.22.0"
+TOKENIZER_CONFIG_MAX_COPY_BYTES = 128 * 1024 * 1024
+TOKENIZER_LARGE_SUFFIXES = {".bin", ".ckpt", ".pt", ".pth", ".safetensors"}
 
 
 QWEN3_RERANKER_PREFIX = (
@@ -177,6 +180,49 @@ def validate_vllm_model_path(model_path: str) -> None:
         )
 
 
+def prepare_vllm_tokenizer_path(model_path: str, output_dir: str) -> str | None:
+    path = Path(model_path)
+    if not path.is_dir():
+        return None
+
+    tokenizer_config_path = path / "tokenizer_config.json"
+    if not tokenizer_config_path.is_file():
+        return None
+
+    try:
+        tokenizer_config = json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Could not parse tokenizer_config.json in {path}: {exc}") from exc
+
+    extra_special_tokens = tokenizer_config.get("extra_special_tokens")
+    if not isinstance(extra_special_tokens, list):
+        return None
+
+    tokenizer_dir = Path(output_dir) / "_vllm_tokenizer"
+    tokenizer_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for src in path.iterdir():
+        if not src.is_file() or src.suffix in TOKENIZER_LARGE_SUFFIXES:
+            continue
+        if src.stat().st_size > TOKENIZER_CONFIG_MAX_COPY_BYTES:
+            continue
+        shutil.copy2(src, tokenizer_dir / src.name)
+        copied += 1
+
+    tokenizer_config["extra_special_tokens"] = {}
+    (tokenizer_dir / "tokenizer_config.json").write_text(
+        json.dumps(tokenizer_config, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    logger.warning(
+        "Patched tokenizer_config extra_special_tokens from list to dict for vLLM/transformers compatibility. "
+        "Using tokenizer copy at %s (%d small config/tokenizer files copied).",
+        tokenizer_dir,
+        copied,
+    )
+    return str(tokenizer_dir)
+
+
 def create_vllm_llm(args: argparse.Namespace) -> Any:
     try:
         import tokenizers
@@ -211,6 +257,7 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
             "Please use tokenizers>=0.21.1,<0.22.0 in the dedicated vLLM eval environment."
         )
     validate_vllm_model_path(args.model_path)
+    tokenizer_path = prepare_vllm_tokenizer_path(args.model_path, args.output_dir)
 
     llm_kwargs: dict[str, Any] = {
         "model": args.model_path,
@@ -224,7 +271,14 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
         "max_num_seqs": args.max_num_seqs,
         "enable_prefix_caching": args.enable_prefix_caching,
     }
+    if tokenizer_path:
+        llm_kwargs["tokenizer"] = tokenizer_path
     filtered_kwargs = filter_supported_kwargs(LLM, llm_kwargs, context="LLM")
+    if tokenizer_path and "tokenizer" not in filtered_kwargs:
+        raise RuntimeError(
+            "This model tokenizer_config needs compatibility patching, but the installed vLLM "
+            "does not support the LLM(..., tokenizer=...) argument."
+        )
     if filtered_kwargs.get("runner") != "pooling":
         raise RuntimeError(
             "This evaluator requires vLLM with LLM(..., runner='pooling'), "
@@ -233,6 +287,7 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
     logger.info("Initializing vLLM with kwargs: %s", json.dumps(_jsonable(filtered_kwargs), ensure_ascii=False))
     llm = LLM(**filtered_kwargs)
     setattr(llm, "_memranker_vllm_version", getattr(vllm, "__version__", "unknown"))
+    setattr(llm, "_memranker_vllm_tokenizer_path", tokenizer_path or "")
     return llm
 
 
@@ -433,6 +488,7 @@ def main() -> None:
             "backend": "vllm",
             "vllm_runner": "pooling",
             "vllm_version": getattr(llm, "_memranker_vllm_version", "unknown"),
+            "vllm_tokenizer_path": getattr(llm, "_memranker_vllm_tokenizer_path", ""),
             "dtype": args.dtype,
             "gpu_memory_utilization": args.gpu_memory_utilization,
             "tensor_parallel_size": args.tensor_parallel_size,

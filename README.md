@@ -775,6 +775,12 @@ uv pip install --upgrade --force-reinstall \
   "sentencepiece>=0.2.0"
 ```
 
+Some local Qwen tokenizer configs store `extra_special_tokens` as a list, while
+`transformers==4.55.x` expects a dict. If you see
+`AttributeError: 'list' object has no attribute 'keys'`, the evaluator now
+creates a patched tokenizer copy under `<output_dir>/_vllm_tokenizer` and passes
+that copy to vLLM. The original model directory is not modified.
+
 Single run:
 
 ```bash

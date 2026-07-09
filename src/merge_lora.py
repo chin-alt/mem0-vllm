@@ -9,6 +9,8 @@ from typing import Any
 
 
 logger = logging.getLogger(__name__)
+TOKENIZER_CONFIG_MAX_COPY_BYTES = 128 * 1024 * 1024
+TOKENIZER_LARGE_SUFFIXES = {".bin", ".ckpt", ".pt", ".pth", ".safetensors"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,6 +78,50 @@ def prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
 
+def prepare_tokenizer_source_path(tokenizer_path: str | Path, work_dir: Path) -> tuple[str, Path | None]:
+    path = Path(tokenizer_path)
+    if not path.is_dir():
+        return str(tokenizer_path), None
+
+    tokenizer_config_path = path / "tokenizer_config.json"
+    if not tokenizer_config_path.is_file():
+        return str(tokenizer_path), None
+
+    try:
+        tokenizer_config = json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Could not parse tokenizer_config.json in {path}: {exc}") from exc
+
+    if not isinstance(tokenizer_config.get("extra_special_tokens"), list):
+        return str(tokenizer_path), None
+
+    temp_dir = work_dir / "_merge_tokenizer_source"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for src in path.iterdir():
+        if not src.is_file() or src.suffix in TOKENIZER_LARGE_SUFFIXES:
+            continue
+        if src.stat().st_size > TOKENIZER_CONFIG_MAX_COPY_BYTES:
+            continue
+        shutil.copy2(src, temp_dir / src.name)
+        copied += 1
+
+    tokenizer_config["extra_special_tokens"] = {}
+    (temp_dir / "tokenizer_config.json").write_text(
+        json.dumps(tokenizer_config, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    logger.warning(
+        "Patched tokenizer_config extra_special_tokens from list to dict for transformers compatibility. "
+        "Using temporary tokenizer copy at %s (%d small config/tokenizer files copied).",
+        temp_dir,
+        copied,
+    )
+    return str(temp_dir), temp_dir
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
     args = parse_args()
@@ -117,8 +163,13 @@ def main() -> None:
         max_shard_size=args.max_shard_size,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True, padding_side="left")
-    tokenizer.save_pretrained(output_dir)
+    tokenizer_load_path, temp_tokenizer_dir = prepare_tokenizer_source_path(tokenizer_path, output_dir)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_load_path, trust_remote_code=True, padding_side="left")
+        tokenizer.save_pretrained(output_dir)
+    finally:
+        if temp_tokenizer_dir is not None:
+            shutil.rmtree(temp_tokenizer_dir, ignore_errors=True)
 
     for filename in ("reranker_config.json", "training_args.json"):
         src = adapter_path / filename
