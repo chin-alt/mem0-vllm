@@ -24,6 +24,7 @@ class RerankerExample:
     raw_label: float
     reason: str = ""
     query_id: str | None = None
+    doc_id: str | None = None
     source_index: int | None = None
 
     @property
@@ -60,6 +61,7 @@ class RerankerDataset:
             "reason": ex.reason,
             "raw_label": ex.raw_label,
             "query_id": ex.query_id,
+            "doc_id": ex.doc_id,
             "group_key": ex.group_key,
         }
 
@@ -165,6 +167,9 @@ def record_to_example(
     query_id = record.get("query_id", record.get("qid"))
     if query_id is not None:
         query_id = str(query_id)
+    doc_id = record.get("doc_id", record.get("docid", record.get("pid", record.get("corpus_id"))))
+    if doc_id is not None:
+        doc_id = str(doc_id)
 
     return RerankerExample(
         instruction=instruction,
@@ -174,6 +179,7 @@ def record_to_example(
         raw_label=raw_label,
         reason=_stringify(record.get("reason", "")).strip(),
         query_id=query_id,
+        doc_id=doc_id,
         source_index=source_index,
     )
 

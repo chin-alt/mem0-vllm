@@ -845,6 +845,88 @@ QWEN3_RERANKER_06B_LORA_PATH=/path/to/qwen3_06b_lora_merged \
 bash scripts/eval_business_matrix_vllm.sh
 ```
 
+## C-MTEB Retrieval Generalization
+
+C-MTEB Retrieval is a group of Hugging Face datasets rather than one local
+file. The verified layout uses separate `corpus` and `queries` parquet splits
+under repos such as `C-MTEB/T2Retrieval`, `C-MTEB/MMarcoRetrieval`,
+`C-MTEB/DuRetrieval`, `C-MTEB/CovidRetrieval`, `C-MTEB/CmedqaRetrieval`,
+`C-MTEB/EcomRetrieval`, and `C-MTEB/MedicalRetrieval`.
+
+Install the conversion dependencies:
+
+```bash
+pip install -r requirements-cmteb.txt
+```
+
+Download the retrieval subsets:
+
+```bash
+OUTPUT_DIR=data/cmteb_r/raw \
+DATASETS="T2Retrieval MMarcoRetrieval DuRetrieval CovidRetrieval CmedqaRetrieval EcomRetrieval MedicalRetrieval" \
+bash scripts/download_cmteb_r.sh
+```
+
+Convert them to the same MemReranker JSONL format used by `src/evaluate.py`.
+The converter keeps the original query group, writes `doc_id`, assigns positive
+documents label `10.0`, and samples random corpus negatives with label `0.0`:
+
+```bash
+INPUT_DIR=data/cmteb_r/raw \
+OUTPUT_FILE=data/cmteb_r/cmteb_r_eval.jsonl \
+NEGATIVES_PER_QUERY=15 \
+MAX_QUERIES_PER_DATASET=1000 \
+MAX_DOCS_PER_QUERY=32 \
+SEED=42 \
+bash scripts/prepare_cmteb_r_eval.sh
+```
+
+It also writes `data/cmteb_r/cmteb_r_eval.metadata.json`, including discovered
+columns, exported query counts, and qrels/positive coverage. If a subset exports
+zero records, inspect that metadata first; some mirrors may omit qrels or store
+positive ids in a nonstandard field. To continue while diagnosing such subsets,
+add `SKIP_MISSING_QRELS=1` to the prepare command.
+
+Evaluate with the regular Transformers evaluator:
+
+```bash
+python src/evaluate.py \
+  --test_file data/cmteb_r/cmteb_r_eval.jsonl \
+  --model_path /path/to/Qwen3-Reranker-0.6B \
+  --output_dir outputs/cmteb_r_eval_06b \
+  --max_length 2048 \
+  --batch_size 8 \
+  --fp16
+```
+
+Evaluate faster with the vLLM scorer:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+TEST_FILE=data/cmteb_r/cmteb_r_eval.jsonl \
+MODEL_PATH=/path/to/Qwen3-Reranker-4B \
+OUTPUT_DIR=outputs/cmteb_r_vllm_4b \
+MAX_LENGTH=2048 \
+BATCH_SIZE=64 \
+DTYPE=float16 \
+TENSOR_PARALLEL_SIZE=2 \
+MAX_NUM_BATCHED_TOKENS=8192 \
+MAX_NUM_SEQS=64 \
+bash scripts/eval_cmteb_r_vllm.sh
+```
+
+Both evaluators write:
+
+```text
+overall_metrics.json
+per_query_metrics.jsonl
+predictions.jsonl
+```
+
+This random-negative conversion is a practical reranker generalization sanity
+test. For a stricter retrieval benchmark, use a fixed first-stage retriever run
+as the candidate set and score those candidates with the same evaluator.
+
 ## Prediction
 
 Prepare `docs.jsonl`:
