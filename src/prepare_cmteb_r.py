@@ -63,6 +63,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--positive_label", type=float, default=10.0)
     parser.add_argument("--negative_label", type=float, default=0.0)
     parser.add_argument(
+        "--supervision_strategy",
+        choices=["auto", "explicit", "id_match"],
+        default="auto",
+        help=(
+            "How to find positive docs. explicit uses qrels/query positive fields only; "
+            "id_match treats query id == corpus id as positive; auto tries explicit first, "
+            "then id_match when enough query ids appear in the corpus."
+        ),
+    )
+    parser.add_argument(
+        "--min_id_match_ratio",
+        type=float,
+        default=0.8,
+        help="Minimum query-id/corpus-id overlap ratio for auto id_match supervision.",
+    )
+    parser.add_argument(
         "--mode",
         choices=["qrels_random", "positives_only"],
         default="qrels_random",
@@ -357,12 +373,36 @@ def build_dataset_records(
     }
     corpus = {doc_id: doc for doc_id, doc in corpus.items() if doc}
     corpus_ids = list(corpus)
+    corpus_id_set = set(corpus_ids)
     qrels = read_qrels(root)
+    query_ids: list[str] = []
+    for query_row in query_rows:
+        try:
+            query_ids.append(row_id(query_row))
+        except ValueError:
+            continue
+    id_match_overlap = sum(1 for qid in query_ids if qid in corpus_id_set)
+    id_match_ratio = id_match_overlap / max(1, len(query_ids))
+    allow_id_match = args.supervision_strategy == "id_match" or (
+        args.supervision_strategy == "auto"
+        and not qrels
+        and id_match_ratio >= args.min_id_match_ratio
+    )
+    if allow_id_match:
+        logger.info(
+            "Using id_match supervision for %s: %d/%d query ids exist in corpus (ratio=%.4f)",
+            name,
+            id_match_overlap,
+            len(query_ids),
+            id_match_ratio,
+        )
 
     records: list[dict[str, Any]] = []
     query_count = 0
     skipped_no_positive = 0
     skipped_no_doc = 0
+    used_explicit_positive = 0
+    used_id_match_positive = 0
     for query_row in tqdm(query_rows, desc=f"Preparing {name}", unit="query", dynamic_ncols=True, ascii=True):
         qid = row_id(query_row)
         query = row_text(query_row, is_doc=False)
@@ -371,10 +411,18 @@ def build_dataset_records(
         positives = list(qrels.get(qid, {}))
         if not positives:
             positives = positives_from_query_row(query_row)
+        supervision_source = "explicit"
+        if not positives and allow_id_match and qid in corpus_id_set:
+            positives = [qid]
+            supervision_source = "id_match"
         positives = [doc_id for doc_id in positives if doc_id in corpus]
         if not positives:
             skipped_no_positive += 1
             continue
+        if supervision_source == "id_match":
+            used_id_match_positive += 1
+        else:
+            used_explicit_positive += 1
 
         query_count += 1
         if args.max_queries_per_dataset > 0 and query_count > args.max_queries_per_dataset:
@@ -400,6 +448,11 @@ def build_dataset_records(
                 skipped_no_doc += 1
                 continue
             is_positive = doc_id in set(positives)
+            positive_reason = (
+                "cmteb_r_id_match_positive"
+                if supervision_source == "id_match"
+                else "cmteb_r_positive"
+            )
             records.append(
                 {
                     "instruction": args.instruction,
@@ -410,7 +463,7 @@ def build_dataset_records(
                     "query": query,
                     "doc": doc,
                     "labels": args.positive_label if is_positive else args.negative_label,
-                    "reason": "cmteb_r_positive" if is_positive else "cmteb_r_random_negative",
+                    "reason": positive_reason if is_positive else "cmteb_r_random_negative",
                 }
             )
 
@@ -425,6 +478,12 @@ def build_dataset_records(
         "skipped_no_positive": skipped_no_positive,
         "skipped_no_doc": skipped_no_doc,
         "qrels_queries": len(qrels),
+        "supervision_strategy": args.supervision_strategy,
+        "min_id_match_ratio": args.min_id_match_ratio,
+        "id_match_overlap_queries": id_match_overlap,
+        "id_match_overlap_ratio": id_match_ratio,
+        "used_explicit_positive_queries": used_explicit_positive,
+        "used_id_match_positive_queries": used_id_match_positive,
         "query_columns": list(query_rows[0]) if query_rows else [],
         "corpus_columns": list(corpus_rows[0]) if corpus_rows else [],
     }
@@ -446,6 +505,8 @@ def main() -> None:
         "output_file": str(output_file),
         "seed": args.seed,
         "mode": args.mode,
+        "supervision_strategy": args.supervision_strategy,
+        "min_id_match_ratio": args.min_id_match_ratio,
         "negatives_per_query": args.negatives_per_query,
         "max_queries_per_dataset": args.max_queries_per_dataset,
         "max_docs_per_query": args.max_docs_per_query,

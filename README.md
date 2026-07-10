@@ -894,6 +894,12 @@ python src/inspect_cmteb_r.py \
   --output_file data/cmteb_r/t2_inspect.json
 ```
 
+For parquet-only C-MTEB retrieval repos, supervision may be implicit: if most
+query ids also exist in the corpus, the positive document for a query is the
+corpus row with the same id. The inspection output reports
+`id_match_overlap_ratio` and `recommended_supervision_strategy`. If it recommends
+`id_match`, the prepare script can build qrels from `query_id == doc_id`.
+
 Convert them to the same MemReranker JSONL format used by `src/evaluate.py`.
 The converter keeps the original query group, writes `doc_id`, assigns positive
 documents label `10.0`, and samples random corpus negatives with label `0.0`:
@@ -905,6 +911,7 @@ NEGATIVES_PER_QUERY=15 \
 MAX_QUERIES_PER_DATASET=1000 \
 MAX_DOCS_PER_QUERY=32 \
 SEED=42 \
+SUPERVISION_STRATEGY=auto \
 bash scripts/prepare_cmteb_r_eval.sh
 ```
 
@@ -915,10 +922,11 @@ positive ids in a nonstandard field. To continue while diagnosing such subsets,
 add `SKIP_MISSING_QRELS=1` to the prepare command.
 
 Important: `corpus-*.parquet` plus `queries-*.parquet` only proves that documents
-and queries are readable. It is not enough for NDCG/MAP/Recall unless the local
-files also contain qrels or positive document ids. `inspect_cmteb_r.py` reports
-`has_supervision`; if it is `false`, you need an additional qrels/ground-truth
-file or an official MTEB-style evaluator that can supply those labels.
+and queries are readable. It is not enough for NDCG/MAP/Recall unless supervision
+can be recovered from qrels, positive document fields, or the `query_id == doc_id`
+rule. `inspect_cmteb_r.py` reports `has_supervision`; if it is `false`, you need
+an additional qrels/ground-truth file or an official MTEB-style evaluator that
+can supply those labels.
 
 Evaluate with the regular Transformers evaluator:
 

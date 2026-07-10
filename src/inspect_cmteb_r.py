@@ -13,6 +13,7 @@ from prepare_cmteb_r import (
     positives_from_query_row,
     read_qrels,
     read_split,
+    row_id,
 )
 
 
@@ -61,6 +62,20 @@ def inspect_dataset(input_dir: Path, dataset: str, sample_rows: int, scan_querie
     qrels = read_qrels(root)
     query_scan = query_rows[: max(0, scan_queries)]
     positive_field_queries = sum(1 for row in query_scan if positives_from_query_row(row))
+    corpus_ids = set()
+    for row in corpus_rows:
+        try:
+            corpus_ids.add(row_id(row))
+        except ValueError:
+            continue
+    query_ids = []
+    for row in query_rows:
+        try:
+            query_ids.append(row_id(row))
+        except ValueError:
+            continue
+    id_match_overlap = sum(1 for qid in query_ids if qid in corpus_ids)
+    id_match_ratio = id_match_overlap / max(1, len(query_ids))
 
     summary.update(
         {
@@ -72,7 +87,16 @@ def inspect_dataset(input_dir: Path, dataset: str, sample_rows: int, scan_querie
             "qrels_query_count": len(qrels),
             "positive_field_queries_in_scan": positive_field_queries,
             "scan_queries": len(query_scan),
-            "has_supervision": bool(qrels) or positive_field_queries > 0,
+            "id_match_overlap_queries": id_match_overlap,
+            "id_match_overlap_ratio": id_match_ratio,
+            "has_supervision": bool(qrels) or positive_field_queries > 0 or id_match_overlap > 0,
+            "recommended_supervision_strategy": (
+                "explicit"
+                if bool(qrels) or positive_field_queries > 0
+                else "id_match"
+                if id_match_ratio >= 0.8
+                else "missing"
+            ),
             "corpus_samples": [compact_row(row) for row in corpus_rows[:sample_rows]],
             "query_samples": [compact_row(row) for row in query_rows[:sample_rows]],
         }

@@ -12,6 +12,8 @@ SEED="${SEED:-42}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 INSTRUCTION="${INSTRUCTION:-Given a Chinese search query, retrieve relevant passages that answer the query.}"
 SKIP_MISSING_QRELS="${SKIP_MISSING_QRELS:-0}"
+SUPERVISION_STRATEGY="${SUPERVISION_STRATEGY:-auto}"
+MIN_ID_MATCH_RATIO="${MIN_ID_MATCH_RATIO:-0.8}"
 
 read -r -a DATASET_ARGS <<< "${DATASETS}"
 EXTRA_ARGS=()
@@ -29,4 +31,6 @@ fi
   --max_docs_per_query "${MAX_DOCS_PER_QUERY}" \
   --doc_max_chars "${DOC_MAX_CHARS}" \
   --seed "${SEED}" \
+  --supervision_strategy "${SUPERVISION_STRATEGY}" \
+  --min_id_match_ratio "${MIN_ID_MATCH_RATIO}" \
   "${EXTRA_ARGS[@]}"
