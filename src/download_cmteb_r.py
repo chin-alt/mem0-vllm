@@ -41,6 +41,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional snapshot_download allow patterns. By default the full dataset repo is downloaded.",
     )
+    parser.add_argument(
+        "--include_qrels",
+        action="store_true",
+        help="Also download paired qrels repos such as C-MTEB/T2Retrieval-qrels.",
+    )
+    parser.add_argument("--qrels_dataset_suffix", default="-qrels")
     return parser.parse_args()
 
 
@@ -50,6 +56,13 @@ def repo_id_from_name(name: str) -> str:
 
 def local_name_from_repo(repo_id: str) -> str:
     return repo_id.split("/", 1)[-1]
+
+
+def qrels_repo_id_from_name(name: str, suffix: str) -> str:
+    namespace, short_name = name.split("/", 1) if "/" in name else ("C-MTEB", name)
+    if short_name.endswith(suffix):
+        return f"{namespace}/{short_name}"
+    return f"{namespace}/{short_name}{suffix}"
 
 
 def snapshot_dataset(repo_id: str, local_dir: Path, args: argparse.Namespace) -> str:
@@ -82,8 +95,11 @@ def main() -> None:
         "revision": args.revision,
         "datasets": [],
     }
-    for name in tqdm(args.datasets, desc="Downloading C-MTEB/R", unit="dataset", dynamic_ncols=True, ascii=True):
-        repo_id = repo_id_from_name(name)
+    download_names = [(repo_id_from_name(name), "retrieval") for name in args.datasets]
+    if args.include_qrels:
+        download_names.extend((qrels_repo_id_from_name(name, args.qrels_dataset_suffix), "qrels") for name in args.datasets)
+
+    for repo_id, kind in tqdm(download_names, desc="Downloading C-MTEB/R", unit="dataset", dynamic_ncols=True, ascii=True):
         local_dir = output_dir / local_name_from_repo(repo_id)
         local_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Downloading %s -> %s", repo_id, local_dir)
@@ -92,6 +108,7 @@ def main() -> None:
             {
                 "name": local_name_from_repo(repo_id),
                 "repo_id": repo_id,
+                "kind": kind,
                 "local_dir": str(local_dir),
                 "snapshot_path": snapshot_path,
             }

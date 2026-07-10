@@ -11,6 +11,7 @@ from prepare_cmteb_r import (
     dataset_dir,
     find_split_files,
     positives_from_query_row,
+    find_qrels_files,
     read_qrels,
     read_split,
     row_id,
@@ -26,6 +27,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--input_dir", default="data/cmteb_r/raw")
     parser.add_argument("--datasets", nargs="+", default=DEFAULT_DATASETS)
+    parser.add_argument("--qrels_input_dir", default="")
+    parser.add_argument("--qrels_dataset_suffix", default="-qrels")
     parser.add_argument("--sample_rows", type=int, default=2)
     parser.add_argument("--scan_queries", type=int, default=1000)
     parser.add_argument("--output_file", default="")
@@ -42,7 +45,14 @@ def compact_row(row: dict[str, Any], max_chars: int = 240) -> dict[str, Any]:
     return compact
 
 
-def inspect_dataset(input_dir: Path, dataset: str, sample_rows: int, scan_queries: int) -> dict[str, Any]:
+def inspect_dataset(
+    input_dir: Path,
+    dataset: str,
+    sample_rows: int,
+    scan_queries: int,
+    qrels_input_dir: str,
+    qrels_dataset_suffix: str,
+) -> dict[str, Any]:
     root = dataset_dir(input_dir, dataset)
     corpus_files = [str(path) for path in find_split_files(root, "corpus")]
     query_files = [str(path) for path in find_split_files(root, "queries")]
@@ -59,7 +69,8 @@ def inspect_dataset(input_dir: Path, dataset: str, sample_rows: int, scan_querie
 
     corpus_rows = read_split(root, "corpus")
     query_rows = read_split(root, "queries")
-    qrels = read_qrels(root)
+    qrels_files = find_qrels_files(root, dataset, qrels_input_dir, qrels_dataset_suffix)
+    qrels = read_qrels(root, dataset, qrels_input_dir, qrels_dataset_suffix)
     query_scan = query_rows[: max(0, scan_queries)]
     positive_field_queries = sum(1 for row in query_scan if positives_from_query_row(row))
     corpus_ids = set()
@@ -85,6 +96,9 @@ def inspect_dataset(input_dir: Path, dataset: str, sample_rows: int, scan_querie
             "corpus_columns": list(corpus_rows[0]) if corpus_rows else [],
             "query_columns": list(query_rows[0]) if query_rows else [],
             "qrels_query_count": len(qrels),
+            "qrels_files": [str(path) for path in qrels_files],
+            "qrels_input_dir": qrels_input_dir,
+            "qrels_dataset_suffix": qrels_dataset_suffix,
             "positive_field_queries_in_scan": positive_field_queries,
             "scan_queries": len(query_scan),
             "id_match_overlap_queries": id_match_overlap,
@@ -109,7 +123,14 @@ def main() -> None:
     args = parse_args()
     input_dir = Path(args.input_dir)
     summaries = [
-        inspect_dataset(input_dir, dataset, args.sample_rows, args.scan_queries)
+        inspect_dataset(
+            input_dir,
+            dataset,
+            args.sample_rows,
+            args.scan_queries,
+            args.qrels_input_dir,
+            args.qrels_dataset_suffix,
+        )
         for dataset in args.datasets
     ]
     payload = {"input_dir": str(input_dir), "datasets": summaries}

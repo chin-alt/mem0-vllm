@@ -54,6 +54,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_file", default="data/cmteb_r/cmteb_r_eval.jsonl")
     parser.add_argument("--metadata_file", default=None)
     parser.add_argument("--datasets", nargs="+", default=DEFAULT_DATASETS)
+    parser.add_argument(
+        "--qrels_input_dir",
+        default="",
+        help=(
+            "Optional base directory for separate qrels repos, for example "
+            "data/cmteb_r containing T2Retrieval-qrels/data/*.parquet."
+        ),
+    )
+    parser.add_argument("--qrels_dataset_suffix", default="-qrels")
     parser.add_argument("--instruction", default=DEFAULT_INSTRUCTION)
     parser.add_argument("--negatives_per_query", type=int, default=15)
     parser.add_argument("--max_queries_per_dataset", type=int, default=1000)
@@ -142,6 +151,17 @@ def read_parquet_files(paths: list[Path]) -> list[dict[str, Any]]:
     for path in paths:
         rows.extend(pq.read_table(path).to_pylist())
     return rows
+
+
+def unique_paths(paths: Iterable[Path]) -> list[Path]:
+    seen = set()
+    unique = []
+    for path in paths:
+        resolved_key = str(path)
+        if resolved_key not in seen:
+            seen.add(resolved_key)
+            unique.append(path)
+    return unique
 
 
 def find_split_files(root: Path, split: str) -> list[Path]:
@@ -281,8 +301,104 @@ def positives_from_query_row(row: dict[str, Any]) -> list[str]:
     return unique
 
 
-def read_qrels(root: Path) -> dict[str, dict[str, float]]:
-    candidates = []
+def qrels_candidate_roots(
+    root: Path,
+    dataset_name: str,
+    qrels_input_dir: str = "",
+    qrels_dataset_suffix: str = "-qrels",
+) -> list[Path]:
+    short_name = dataset_name.split("/", 1)[-1]
+    candidates = [root, root / "data"]
+    if root.name == "data":
+        candidates.append(root.parent)
+
+    bases: list[Path] = []
+    if qrels_input_dir:
+        bases.append(Path(qrels_input_dir))
+    if root.name == "data":
+        bases.extend([root.parent.parent, root.parent])
+    else:
+        bases.append(root.parent)
+
+    qrels_names = [
+        f"{short_name}{qrels_dataset_suffix}",
+        f"{short_name}_qrels",
+        f"{short_name}-qrel",
+    ]
+    for base in bases:
+        candidates.extend(base / name for name in qrels_names)
+        if "qrel" in base.name.lower():
+            candidates.append(base)
+    return unique_paths(path for path in candidates if path.exists())
+
+
+def find_qrels_files(
+    root: Path,
+    dataset_name: str,
+    qrels_input_dir: str = "",
+    qrels_dataset_suffix: str = "-qrels",
+) -> list[Path]:
+    roots = qrels_candidate_roots(root, dataset_name, qrels_input_dir, qrels_dataset_suffix)
+    candidates: list[Path] = []
+    qrels_name = f"{dataset_name.split('/', 1)[-1]}{qrels_dataset_suffix}".lower()
+    main_patterns = (
+        "qrels/*.tsv",
+        "qrels/*.txt",
+        "qrels/*.csv",
+        "qrels/*.parquet",
+        "*qrels*.tsv",
+        "*qrels*.txt",
+        "*qrels*.csv",
+        "*qrels*.parquet",
+    )
+    separate_patterns = (
+        "*.tsv",
+        "*.txt",
+        "*.csv",
+        "*.parquet",
+        "data/*.tsv",
+        "data/*.txt",
+        "data/*.csv",
+        "data/*.parquet",
+        "qrels/*.tsv",
+        "qrels/*.txt",
+        "qrels/*.csv",
+        "qrels/*.parquet",
+    )
+    for base in roots:
+        is_separate_qrels_repo = "qrel" in base.name.lower() or base.name.lower() == qrels_name
+        patterns = separate_patterns if is_separate_qrels_repo else main_patterns
+        for pattern in patterns:
+            candidates.extend(base.glob(pattern))
+    return sorted(path for path in unique_paths(candidates) if path.is_file())
+
+
+def add_qrel_row(qrels: dict[str, dict[str, float]], row: dict[str, Any]) -> None:
+    qid = (
+        row.get("qid")
+        or row.get("query-id")
+        or row.get("query_id")
+        or row.get("query")
+    )
+    docid = (
+        row.get("pid")
+        or row.get("pids")
+        or row.get("corpus-id")
+        or row.get("corpus_id")
+        or row.get("docid")
+        or row.get("doc_id")
+    )
+    score_raw = row.get("score", row.get("relevance", row.get("label", 1)))
+    add_qrel(qrels, qid, docid, score_raw)
+
+
+def read_qrels(
+    root: Path,
+    dataset_name: str,
+    qrels_input_dir: str = "",
+    qrels_dataset_suffix: str = "-qrels",
+) -> dict[str, dict[str, float]]:
+    candidates = find_qrels_files(root, dataset_name, qrels_input_dir, qrels_dataset_suffix)
     search_roots = [root, root / "data"]
     if root.name == "data":
         search_roots.append(root.parent)
@@ -300,6 +416,10 @@ def read_qrels(root: Path) -> dict[str, dict[str, float]]:
                 candidates.extend(base.glob(pattern))
     qrels: dict[str, dict[str, float]] = {}
     for path in sorted(set(candidates)):
+        if path.suffix.lower() == ".parquet":
+            for row in read_parquet_files([path]):
+                add_qrel_row(qrels, row)
+            continue
         delimiter = "," if path.suffix.lower() == ".csv" else "\t"
         with path.open("r", encoding="utf-8-sig", newline="") as f:
             first_line = f.readline()
@@ -314,6 +434,8 @@ def read_qrels(root: Path) -> dict[str, dict[str, float]]:
                 "corpus_id",
                 "docid",
                 "doc_id",
+                "pid",
+                "pids",
                 "score",
                 "relevance",
                 "label",
@@ -322,10 +444,7 @@ def read_qrels(root: Path) -> dict[str, dict[str, float]]:
             reader = csv.DictReader(f, delimiter=delimiter) if has_header else None
             if reader is not None:
                 for row in reader:
-                    qid = row.get("query-id") or row.get("query_id") or row.get("qid") or row.get("query")
-                    docid = row.get("corpus-id") or row.get("corpus_id") or row.get("docid") or row.get("doc_id")
-                    score_raw = row.get("score") or row.get("relevance") or row.get("label") or 1
-                    add_qrel(qrels, qid, docid, score_raw)
+                    add_qrel_row(qrels, row)
             else:
                 for line in f:
                     parts = line.strip().split()
@@ -374,7 +493,8 @@ def build_dataset_records(
     corpus = {doc_id: doc for doc_id, doc in corpus.items() if doc}
     corpus_ids = list(corpus)
     corpus_id_set = set(corpus_ids)
-    qrels = read_qrels(root)
+    qrels_files = find_qrels_files(root, name, args.qrels_input_dir, args.qrels_dataset_suffix)
+    qrels = read_qrels(root, name, args.qrels_input_dir, args.qrels_dataset_suffix)
     query_ids: list[str] = []
     for query_row in query_rows:
         try:
@@ -478,6 +598,9 @@ def build_dataset_records(
         "skipped_no_positive": skipped_no_positive,
         "skipped_no_doc": skipped_no_doc,
         "qrels_queries": len(qrels),
+        "qrels_files": [str(path) for path in qrels_files],
+        "qrels_input_dir": args.qrels_input_dir,
+        "qrels_dataset_suffix": args.qrels_dataset_suffix,
         "supervision_strategy": args.supervision_strategy,
         "min_id_match_ratio": args.min_id_match_ratio,
         "id_match_overlap_queries": id_match_overlap,
@@ -507,6 +630,8 @@ def main() -> None:
         "mode": args.mode,
         "supervision_strategy": args.supervision_strategy,
         "min_id_match_ratio": args.min_id_match_ratio,
+        "qrels_input_dir": args.qrels_input_dir,
+        "qrels_dataset_suffix": args.qrels_dataset_suffix,
         "negatives_per_query": args.negatives_per_query,
         "max_queries_per_dataset": args.max_queries_per_dataset,
         "max_docs_per_query": args.max_docs_per_query,
