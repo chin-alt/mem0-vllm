@@ -867,6 +867,33 @@ DATASETS="T2Retrieval MMarcoRetrieval DuRetrieval CovidRetrieval CmedqaRetrieval
 bash scripts/download_cmteb_r.sh
 ```
 
+If you manually download parquet files from Hugging Face, keep either of these
+layouts:
+
+```text
+data/cmteb_r/raw/T2Retrieval/data/corpus-*.parquet
+data/cmteb_r/raw/T2Retrieval/data/queries-*.parquet
+```
+
+or:
+
+```text
+data/cmteb_r/raw/T2Retrieval/corpus-*.parquet
+data/cmteb_r/raw/T2Retrieval/queries-*.parquet
+```
+
+You can also pass `--input_dir` directly to `.../T2Retrieval` or
+`.../T2Retrieval/data` for a single manually downloaded dataset.
+
+Inspect local columns and supervision coverage before conversion:
+
+```bash
+python src/inspect_cmteb_r.py \
+  --input_dir data/cmteb_r/raw/T2Retrieval \
+  --datasets T2Retrieval \
+  --output_file data/cmteb_r/t2_inspect.json
+```
+
 Convert them to the same MemReranker JSONL format used by `src/evaluate.py`.
 The converter keeps the original query group, writes `doc_id`, assigns positive
 documents label `10.0`, and samples random corpus negatives with label `0.0`:
@@ -886,6 +913,12 @@ columns, exported query counts, and qrels/positive coverage. If a subset exports
 zero records, inspect that metadata first; some mirrors may omit qrels or store
 positive ids in a nonstandard field. To continue while diagnosing such subsets,
 add `SKIP_MISSING_QRELS=1` to the prepare command.
+
+Important: `corpus-*.parquet` plus `queries-*.parquet` only proves that documents
+and queries are readable. It is not enough for NDCG/MAP/Recall unless the local
+files also contain qrels or positive document ids. `inspect_cmteb_r.py` reports
+`has_supervision`; if it is `false`, you need an additional qrels/ground-truth
+file or an official MTEB-style evaluator that can supply those labels.
 
 Evaluate with the regular Transformers evaluator:
 

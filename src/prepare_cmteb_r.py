@@ -99,6 +99,13 @@ def stringify(value: Any) -> str:
 def dataset_dir(input_dir: Path, name: str) -> Path:
     if "/" in name:
         name = name.split("/", 1)[1]
+    candidates = [input_dir / name, input_dir]
+    for candidate in candidates:
+        if candidate.exists() and has_split_files(candidate):
+            return candidate
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
     return input_dir / name
 
 
@@ -113,13 +120,12 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def read_parquet_files(paths: list[Path]) -> list[dict[str, Any]]:
-    import pandas as pd
+    import pyarrow.parquet as pq
 
-    frames = [pd.read_parquet(path) for path in paths]
-    if not frames:
-        return []
-    data = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-    return data.to_dict(orient="records")
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        rows.extend(pq.read_table(path).to_pylist())
+    return rows
 
 
 def find_split_files(root: Path, split: str) -> list[Path]:
@@ -144,10 +150,17 @@ def find_split_files(root: Path, split: str) -> list[Path]:
     return unique
 
 
+def has_split_files(root: Path) -> bool:
+    return bool(find_split_files(root, "corpus")) and bool(find_split_files(root, "queries"))
+
+
 def read_split(root: Path, split: str) -> list[dict[str, Any]]:
     files = find_split_files(root, split)
     if not files:
-        raise FileNotFoundError(f"Could not find {split} files under {root}")
+        raise FileNotFoundError(
+            f"Could not find {split} files under {root}. Expected files like "
+            f"{split}-*.parquet, data/{split}-*.parquet, {split}.jsonl, or {split}.json."
+        )
     suffixes = {path.suffix.lower() for path in files}
     if suffixes == {".parquet"}:
         return read_parquet_files(files)
@@ -254,8 +267,21 @@ def positives_from_query_row(row: dict[str, Any]) -> list[str]:
 
 def read_qrels(root: Path) -> dict[str, dict[str, float]]:
     candidates = []
-    for pattern in ("qrels/*.tsv", "qrels/*.txt", "qrels/*.csv", "*qrels*.tsv", "*qrels*.txt", "*qrels*.csv"):
-        candidates.extend(root.glob(pattern))
+    search_roots = [root, root / "data"]
+    if root.name == "data":
+        search_roots.append(root.parent)
+    patterns = (
+        "qrels/*.tsv",
+        "qrels/*.txt",
+        "qrels/*.csv",
+        "*qrels*.tsv",
+        "*qrels*.txt",
+        "*qrels*.csv",
+    )
+    for base in search_roots:
+        if base.exists():
+            for pattern in patterns:
+                candidates.extend(base.glob(pattern))
     qrels: dict[str, dict[str, float]] = {}
     for path in sorted(set(candidates)):
         delimiter = "," if path.suffix.lower() == ".csv" else "\t"
@@ -435,7 +461,12 @@ def main() -> None:
             raise FileNotFoundError(message)
         records, meta = build_dataset_records(dataset.split("/", 1)[-1], root, args, rng)
         if not records:
-            message = f"No records exported for {dataset}; qrels/positive doc ids may be absent."
+            message = (
+                f"No records exported for {dataset}; corpus/queries were readable, but no qrels or "
+                "positive document ids were found. Manually downloaded C-MTEB parquet files often "
+                "contain only corpus-*.parquet and queries-*.parquet, which is not enough to compute "
+                "NDCG/MAP/Recall unless relevance labels are present in qrels or query positive fields."
+            )
             if args.skip_missing_qrels:
                 logger.warning(message)
                 metadata["datasets"].append(meta)
