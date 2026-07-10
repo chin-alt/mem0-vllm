@@ -34,7 +34,7 @@ fi
   --doc_max_chars "${DOC_MAX_CHARS}" \
   --seed "${SEED}" \
   --qrels_input_dir "${QRELS_INPUT_DIR}" \
-  --qrels_dataset_suffix "${QRELS_DATASET_SUFFIX}" \
+  --qrels_dataset_suffix="${QRELS_DATASET_SUFFIX}" \
   --supervision_strategy "${SUPERVISION_STRATEGY}" \
   --min_id_match_ratio "${MIN_ID_MATCH_RATIO}" \
   "${EXTRA_ARGS[@]}"

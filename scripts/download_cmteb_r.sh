@@ -16,5 +16,5 @@ fi
 "${PYTHON_BIN}" src/download_cmteb_r.py \
   --output_dir "${OUTPUT_DIR}" \
   --datasets "${DATASET_ARGS[@]}" \
-  --qrels_dataset_suffix "${QRELS_DATASET_SUFFIX}" \
+  --qrels_dataset_suffix="${QRELS_DATASET_SUFFIX}" \
   "${EXTRA_ARGS[@]}"

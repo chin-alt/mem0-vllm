@@ -912,6 +912,7 @@ documents label `10.0`, and samples random corpus negatives with label `0.0`:
 INPUT_DIR=data/cmteb_r/raw \
 QRELS_INPUT_DIR=data/cmteb_r/raw \
 OUTPUT_FILE=data/cmteb_r/cmteb_r_eval.jsonl \
+DATASETS="T2Retrieval" \
 NEGATIVES_PER_QUERY=15 \
 MAX_QUERIES_PER_DATASET=1000 \
 MAX_DOCS_PER_QUERY=32 \
