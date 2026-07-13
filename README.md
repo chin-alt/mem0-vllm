@@ -986,6 +986,46 @@ This random-negative conversion is a practical reranker generalization sanity
 test. For a stricter retrieval benchmark, use a fixed first-stage retriever run
 as the candidate set and score those candidates with the same evaluator.
 
+For a business-like CMTEB-R reranker evaluation, build a first-stage candidate
+list from the corpus first. The BM25 builder uses qrels only for labels; by
+default it does not force missed positives into the candidate set:
+
+```bash
+INPUT_DIR=data/cmteb_r \
+QRELS_INPUT_DIR=data/cmteb_r \
+OUTPUT_FILE=data/cmteb_r/cmteb_r_bm25_candidates.jsonl \
+DATASETS="T2Retrieval" \
+CANDIDATE_TOP_K=100 \
+MAX_QUERIES_PER_DATASET=1000 \
+INDEX_DOC_MAX_CHARS=2048 \
+bash scripts/build_cmteb_r_candidates.sh
+```
+
+Then rerank that candidate file:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+TEST_FILE=data/cmteb_r/cmteb_r_bm25_candidates.jsonl \
+MODEL_PATH=/path/to/Qwen3-Reranker-4B \
+OUTPUT_DIR=outputs/cmteb_r_bm25_vllm_4b \
+MAX_LENGTH=2048 \
+BATCH_SIZE=64 \
+EXPECTED_FBETA_BETAS="0.2 0.3 0.5 0.7 1.0" \
+bash scripts/eval_cmteb_r_vllm.sh
+```
+
+This writes the normal ranking outputs plus dynamic-cutoff reports:
+
+```text
+beta_f1_summary.csv
+beta_f1_summary.json
+beta_f1_per_query.jsonl
+```
+
+`IdealTopK` is the number of qrels-positive documents present in the first-stage
+candidate list for that query. `CandidateRecall` uses the full qrels positive
+count as denominator, so first-stage misses are visible in the final report.
+
 ## Prediction
 
 Prepare `docs.jsonl`:

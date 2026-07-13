@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
+import math
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
@@ -16,7 +20,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from business_eval_vllm import create_vllm_llm, score_with_vllm  # noqa: E402
-from data import load_examples, write_jsonl  # noqa: E402
+from data import load_examples, read_json_records, write_jsonl  # noqa: E402
 from metrics import add_group_ranks, compute_all_metrics  # noqa: E402
 from modeling import DEFAULT_MODEL_NAME  # noqa: E402
 
@@ -44,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_sort_by_length", dest="sort_by_length", action="store_false")
     parser.add_argument("--sort_descending", action="store_true")
     parser.add_argument("--local_files_only", action="store_true")
+    parser.add_argument("--expected_fbeta_betas", type=float, nargs="+", default=[0.2, 0.3, 0.5, 0.7, 1.0])
     return parser.parse_args()
 
 
@@ -56,10 +61,138 @@ def choose_instruction(args_instruction: str, examples: list) -> str:
     return "Given a query, retrieve relevant documents that answer the query."
 
 
+def choose_expected_fbeta_best_k(score_list: list[float], beta: float) -> tuple[int, float]:
+    if not score_list:
+        return 0, 0.0
+    scores = np.asarray(score_list, dtype=np.float64)
+    norm_scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
+    cum_gain = np.cumsum(norm_scores)
+    total_sum = float(cum_gain[-1]) if len(cum_gain) else 0.0
+    k_array = np.arange(1, len(scores) + 1, dtype=np.float64)
+    expected_fbeta = (1 + beta**2) * cum_gain / (beta**2 * total_sum + k_array)
+    best_idx = int(np.argmax(expected_fbeta))
+    return best_idx + 1, float(expected_fbeta[best_idx])
+
+
+def f1_from_precision_recall(precision: float, recall: float) -> float:
+    return 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+
+
+def compute_dynamic_beta_metrics(
+    rows: list[dict],
+    betas: list[float],
+    relevance_threshold: float,
+) -> tuple[list[dict], list[dict], dict[str, float]]:
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("group_key") or row.get("query_id") or row.get("query"))].append(row)
+
+    per_query_rows: list[dict] = []
+    summary_rows: list[dict] = []
+    overall_updates: dict[str, float] = {}
+    true_count_sum = 0
+    candidate_relevant_sum = 0
+    ideal_top_k_sum = 0
+
+    for group_key, group_rows in grouped.items():
+        ranked = sorted(group_rows, key=lambda row: (int(row.get("rank_by_score", 10**9)), -float(row.get("score", 0.0))))
+        relevant_ids = {str(row["doc_id"]) for row in ranked if float(row.get("label", 0.0)) >= relevance_threshold}
+        true_counts = [int(row.get("true_relevant_count") or 0) for row in ranked]
+        true_count = max(true_counts) if true_counts else 0
+        if true_count <= 0:
+            true_count = len(relevant_ids)
+        candidate_relevant_count = len(relevant_ids)
+        ideal_top_k = candidate_relevant_count
+        true_count_sum += true_count
+        candidate_relevant_sum += candidate_relevant_count
+        ideal_top_k_sum += ideal_top_k
+
+        score_list = [float(row.get("score", 0.0)) for row in ranked]
+        base = {
+            "group_key": group_key,
+            "query": ranked[0].get("query", "") if ranked else "",
+            "query_id": ranked[0].get("query_id", "") if ranked else "",
+            "qid": ranked[0].get("qid", "") if ranked else "",
+            "num_candidates": len(ranked),
+            "true_relevant_count": true_count,
+            "candidate_relevant_count": candidate_relevant_count,
+            "IdealTopK": ideal_top_k,
+            "CandidateRecall": candidate_relevant_count / true_count if true_count else 0.0,
+        }
+        for beta in betas:
+            best_k, expected_fbeta = choose_expected_fbeta_best_k(score_list, beta=beta)
+            selected = ranked[:best_k]
+            selected_ids = [str(row["doc_id"]) for row in selected]
+            hit_count = len(set(selected_ids) & relevant_ids)
+            precision = hit_count / len(selected_ids) if selected_ids else 0.0
+            recall = hit_count / true_count if true_count else 0.0
+            per_query_rows.append(
+                {
+                    **base,
+                    "beta": beta,
+                    "BestK@ExpectedFbeta": best_k,
+                    "ExpectedFbeta@BestK": expected_fbeta,
+                    "selected_doc_ids": ",".join(selected_ids),
+                    "hit_count": hit_count,
+                    "precision": precision,
+                    "recall": recall,
+                    "f1": f1_from_precision_recall(precision, recall),
+                }
+            )
+
+    denom = max(1, len(grouped))
+    overall_updates["AvgIdealTopK"] = ideal_top_k_sum / denom
+    overall_updates["CandidateRecall"] = candidate_relevant_sum / true_count_sum if true_count_sum else 0.0
+
+    for beta in betas:
+        beta_rows = [row for row in per_query_rows if float(row["beta"]) == float(beta)]
+        beta_denom = max(1, len(beta_rows))
+        total_selected = sum(int(row["BestK@ExpectedFbeta"]) for row in beta_rows)
+        total_hits = sum(int(row["hit_count"]) for row in beta_rows)
+        total_true = sum(int(row["true_relevant_count"]) for row in beta_rows)
+        micro_precision = total_hits / total_selected if total_selected else 0.0
+        micro_recall = total_hits / total_true if total_true else 0.0
+        beta_key = str(beta).replace(".", "_")
+        summary = {
+            "beta": beta,
+            "num_queries": len(beta_rows),
+            "avg_ideal_top_k": sum(float(row["IdealTopK"]) for row in beta_rows) / beta_denom,
+            "avg_best_k": sum(float(row["BestK@ExpectedFbeta"]) for row in beta_rows) / beta_denom,
+            "avg_expected_fbeta": sum(float(row["ExpectedFbeta@BestK"]) for row in beta_rows) / beta_denom,
+            "avg_precision": sum(float(row["precision"]) for row in beta_rows) / beta_denom,
+            "avg_recall": sum(float(row["recall"]) for row in beta_rows) / beta_denom,
+            "avg_f1": sum(float(row["f1"]) for row in beta_rows) / beta_denom,
+            "micro_precision": micro_precision,
+            "micro_recall": micro_recall,
+            "micro_f1": f1_from_precision_recall(micro_precision, micro_recall),
+        }
+        summary_rows.append(summary)
+        for key, value in summary.items():
+            if key not in {"beta", "num_queries"}:
+                overall_updates[f"beta_{beta_key}_{key}"] = float(value)
+    return per_query_rows, summary_rows, overall_updates
+
+
+def write_csv(path: Path, rows: list[dict]) -> None:
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
     args = parse_args()
     examples = load_examples(args.test_file)
+    raw_records = read_json_records(args.test_file)
     instruction = choose_instruction(args.instruction, examples)
     llm = create_vllm_llm(args)
 
@@ -81,17 +214,22 @@ def main() -> None:
     examples_per_sec = len(scores) / score_time if score_time > 0 else 0.0
 
     rows = []
-    for ex, score in zip(examples, scores, strict=False):
+    for ex, score, raw in zip(examples, scores, raw_records, strict=False):
         rows.append(
             {
                 "group_key": ex.group_key,
                 "query": ex.query,
                 "query_id": ex.query_id,
+                "qid": raw.get("qid", ""),
                 "doc_id": ex.doc_id,
                 "doc": ex.doc,
                 "label": ex.label,
                 "raw_label": ex.raw_label,
                 "score": float(score),
+                "retrieval_rank": raw.get("retrieval_rank"),
+                "retrieval_score": raw.get("retrieval_score"),
+                "true_relevant_count": raw.get("true_relevant_count"),
+                "candidate_relevant_count": raw.get("candidate_relevant_count"),
                 "reason": ex.reason,
             }
         )
@@ -99,6 +237,11 @@ def main() -> None:
     overall, per_query = compute_all_metrics(
         rows,
         query_key="group_key",
+        relevance_threshold=args.relevance_threshold,
+    )
+    beta_per_query, beta_summary, beta_overall = compute_dynamic_beta_metrics(
+        rows,
+        betas=args.expected_fbeta_betas,
         relevance_threshold=args.relevance_threshold,
     )
     overall.update(
@@ -118,11 +261,13 @@ def main() -> None:
             "sort_by_length": args.sort_by_length,
             "sort_descending": args.sort_descending,
             "local_files_only": args.local_files_only,
+            "expected_fbeta_betas": args.expected_fbeta_betas,
             "score_time_seconds": float(score_time),
             "seconds_per_example": float(sec_per_example),
             "examples_per_second": float(examples_per_sec),
         }
     )
+    overall.update(beta_overall)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -132,6 +277,12 @@ def main() -> None:
     )
     write_jsonl(output_dir / "per_query_metrics.jsonl", per_query)
     write_jsonl(output_dir / "predictions.jsonl", rows)
+    write_jsonl(output_dir / "beta_f1_per_query.jsonl", beta_per_query)
+    write_csv(output_dir / "beta_f1_summary.csv", beta_summary)
+    (output_dir / "beta_f1_summary.json").write_text(
+        json.dumps(beta_summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     logger.info("Wrote vLLM JSONL evaluation outputs to %s", output_dir)
     print(json.dumps(overall, ensure_ascii=False, indent=2))
 

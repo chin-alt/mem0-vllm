@@ -14,6 +14,7 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-1}"
 SORT_DESCENDING="${SORT_DESCENDING:-0}"
+EXPECTED_FBETA_BETAS="${EXPECTED_FBETA_BETAS:-0.2 0.3 0.5 0.7 1.0}"
 
 EXTRA_ARGS=()
 if [[ "${LOCAL_FILES_ONLY}" == "1" ]]; then
@@ -22,6 +23,7 @@ fi
 if [[ "${SORT_DESCENDING}" == "1" ]]; then
   EXTRA_ARGS+=(--sort_descending)
 fi
+read -r -a BETA_ARGS <<< "${EXPECTED_FBETA_BETAS}"
 
 "${PYTHON_BIN}" src/evaluate_jsonl_vllm.py \
   --test_file "${TEST_FILE}" \
@@ -34,5 +36,6 @@ fi
   --tensor_parallel_size "${TENSOR_PARALLEL_SIZE}" \
   --max_num_batched_tokens "${MAX_NUM_BATCHED_TOKENS}" \
   --max_num_seqs "${MAX_NUM_SEQS}" \
+  --expected_fbeta_betas "${BETA_ARGS[@]}" \
   --sort_by_length \
   "${EXTRA_ARGS[@]}"
