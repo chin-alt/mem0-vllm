@@ -1045,15 +1045,42 @@ model should be much faster. If GPU memory is tight, reduce
 Then rerank that candidate file:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
 TEST_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates.jsonl \
 MODEL_PATH=/path/to/Qwen3-Reranker-4B \
 OUTPUT_DIR=outputs/cmteb_r_qwen3_embedding_vllm_4b \
 MAX_LENGTH=2048 \
 BATCH_SIZE=64 \
+TENSOR_PARALLEL_SIZE=auto \
 EXPECTED_FBETA_BETAS="0.2 0.3 0.5 0.7 1.0" \
 bash scripts/eval_cmteb_r_vllm.sh
 ```
+
+`TENSOR_PARALLEL_SIZE=auto` counts `CUDA_VISIBLE_DEVICES`, so the command above
+passes `--tensor_parallel_size 4` to vLLM. If you want a single-card run while
+multiple GPUs are visible, set `TENSOR_PARALLEL_SIZE=1`.
+
+For higher throughput when each GPU can hold one full reranker copy, use the
+data-parallel evaluator instead. It splits the JSONL by query group, launches
+one vLLM worker per GPU with `tensor_parallel_size=1`, then merges predictions
+and recomputes global metrics:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+DEVICES=0,1,2,3 \
+NUM_SHARDS=4 \
+TEST_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates.jsonl \
+MODEL_PATH=/path/to/Qwen3-Reranker-4B \
+OUTPUT_DIR=outputs/cmteb_r_qwen3_embedding_vllm_4b_dp \
+MAX_LENGTH=2048 \
+BATCH_SIZE=64 \
+EXPECTED_FBETA_BETAS="0.2 0.3 0.5 0.7 1.0" \
+bash scripts/eval_cmteb_r_vllm_dp.sh
+```
+
+Data-parallel shard logs and intermediate outputs are kept under
+`OUTPUT_DIR/_dp_shards/shard_*/`. The merged root `OUTPUT_DIR` contains the same
+files as the single-process evaluator, plus `shard_metrics.jsonl`.
 
 This writes the normal ranking outputs plus dynamic-cutoff reports:
 
