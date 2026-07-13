@@ -94,6 +94,12 @@ def compute_dynamic_beta_metrics(
     true_count_sum = 0
     candidate_relevant_sum = 0
     ideal_top_k_sum = 0
+    ideal_topk_precision_sum = 0.0
+    ideal_topk_recall_sum = 0.0
+    ideal_topk_f1_sum = 0.0
+    ideal_topk_selected_sum = 0
+    ideal_topk_hit_sum = 0
+    ideal_topk_true_sum = 0
 
     for group_key, group_rows in grouped.items():
         ranked = sorted(group_rows, key=lambda row: (int(row.get("rank_by_score", 10**9)), -float(row.get("score", 0.0))))
@@ -107,6 +113,18 @@ def compute_dynamic_beta_metrics(
         true_count_sum += true_count
         candidate_relevant_sum += candidate_relevant_count
         ideal_top_k_sum += ideal_top_k
+        ideal_selected = ranked[:ideal_top_k]
+        ideal_selected_ids = [str(row["doc_id"]) for row in ideal_selected]
+        ideal_hit_count = len(set(ideal_selected_ids) & relevant_ids)
+        ideal_precision = ideal_hit_count / len(ideal_selected_ids) if ideal_selected_ids else 0.0
+        ideal_recall = ideal_hit_count / true_count if true_count else 0.0
+        ideal_f1 = f1_from_precision_recall(ideal_precision, ideal_recall)
+        ideal_topk_precision_sum += ideal_precision
+        ideal_topk_recall_sum += ideal_recall
+        ideal_topk_f1_sum += ideal_f1
+        ideal_topk_selected_sum += len(ideal_selected_ids)
+        ideal_topk_hit_sum += ideal_hit_count
+        ideal_topk_true_sum += true_count
 
         score_list = [float(row.get("score", 0.0)) for row in ranked]
         base = {
@@ -119,6 +137,11 @@ def compute_dynamic_beta_metrics(
             "candidate_relevant_count": candidate_relevant_count,
             "IdealTopK": ideal_top_k,
             "CandidateRecall": candidate_relevant_count / true_count if true_count else 0.0,
+            "IdealTopKSelectedDocIds": ",".join(ideal_selected_ids),
+            "IdealTopKHitCount": ideal_hit_count,
+            "Precision@IdealTopK": ideal_precision,
+            "Recall@IdealTopK": ideal_recall,
+            "F1@IdealTopK": ideal_f1,
         }
         for beta in betas:
             best_k, expected_fbeta = choose_expected_fbeta_best_k(score_list, beta=beta)
@@ -144,6 +167,14 @@ def compute_dynamic_beta_metrics(
     denom = max(1, len(grouped))
     overall_updates["AvgIdealTopK"] = ideal_top_k_sum / denom
     overall_updates["CandidateRecall"] = candidate_relevant_sum / true_count_sum if true_count_sum else 0.0
+    overall_updates["Precision@IdealTopK"] = ideal_topk_precision_sum / denom
+    overall_updates["Recall@IdealTopK"] = ideal_topk_recall_sum / denom
+    overall_updates["F1@IdealTopK"] = ideal_topk_f1_sum / denom
+    micro_ideal_precision = ideal_topk_hit_sum / ideal_topk_selected_sum if ideal_topk_selected_sum else 0.0
+    micro_ideal_recall = ideal_topk_hit_sum / ideal_topk_true_sum if ideal_topk_true_sum else 0.0
+    overall_updates["MicroPrecision@IdealTopK"] = micro_ideal_precision
+    overall_updates["MicroRecall@IdealTopK"] = micro_ideal_recall
+    overall_updates["MicroF1@IdealTopK"] = f1_from_precision_recall(micro_ideal_precision, micro_ideal_recall)
 
     for beta in betas:
         beta_rows = [row for row in per_query_rows if float(row["beta"]) == float(beta)]

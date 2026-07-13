@@ -1086,15 +1086,17 @@ Data-parallel shard logs and intermediate outputs are kept under
 `OUTPUT_DIR/_dp_shards/shard_*/`. The merged root `OUTPUT_DIR` contains the same
 files as the single-process evaluator, plus `shard_metrics.jsonl`.
 
-If long-tail documents make later batches too slow, prepare a shorter 10%
-query-group subset first:
+If long-tail documents make later batches too slow, prepare a 10% fast subset
+first. This script now filters overlong query-document pairs before sampling,
+then samples query groups until the output is close to 10% of the original row
+count:
 
 ```bash
 INPUT_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates.jsonl \
-OUTPUT_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates_10pct_short.jsonl \
+OUTPUT_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates_10pct_maxlen2048.jsonl \
 SAMPLE_RATIO=0.10 \
 SEED=42 \
-MAX_DOC_CHARS=2048 \
+MAX_LENGTH=2048 \
 MAX_DOCS_PER_QUERY=0 \
 bash scripts/prepare_fast_eval_subset.sh
 ```
@@ -1102,14 +1104,16 @@ bash scripts/prepare_fast_eval_subset.sh
 Then point the evaluator to the subset:
 
 ```bash
-TEST_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates_10pct_short.jsonl \
+TEST_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates_10pct_maxlen2048.jsonl \
 OUTPUT_DIR=outputs/cmteb_r_qwen3_embedding_vllm_4b_dp_10pct \
 bash scripts/eval_cmteb_r_vllm_dp.sh
 ```
 
-Sampling is done by query group, not by individual row, so each sampled query
-keeps its candidate list and ranking metrics remain meaningful. Set
-`DROP_IF_PAIR_CHARS_GT` to drop pairs that are still too long after truncation,
+Rows whose formatted instruction+query+doc character length is greater than
+`MAX_LENGTH` are dropped before sampling. Groups with no remaining relevant docs
+are dropped by default. Sampling is done by query group, not by individual row,
+so each sampled query keeps its candidate list and ranking metrics remain
+meaningful. Set `MAX_DOC_CHARS` only if you still want post-filter truncation,
 or `MAX_DOCS_PER_QUERY` to cap the candidate count per query.
 
 This writes the normal ranking outputs plus dynamic-cutoff reports:
@@ -1121,8 +1125,11 @@ beta_f1_per_query.jsonl
 ```
 
 `IdealTopK` is the number of qrels-positive documents present in the first-stage
-candidate list for that query. `CandidateRecall` uses the full qrels positive
-count as denominator, so first-stage misses are visible in the final report.
+candidate list for that query. The evaluator also reports
+`Precision@IdealTopK`, `Recall@IdealTopK`, and `F1@IdealTopK` by truncating the
+model-ranked list at that ideal candidate count. `CandidateRecall` uses the full
+qrels positive count as denominator, so first-stage misses and length-filter
+misses are visible in the final report.
 
 ## Prediction
 
