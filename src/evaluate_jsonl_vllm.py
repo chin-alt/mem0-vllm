@@ -49,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sort_descending", action="store_true")
     parser.add_argument("--local_files_only", action="store_true")
     parser.add_argument("--expected_fbeta_betas", type=float, nargs="+", default=[0.2, 0.3, 0.5, 0.7, 1.0])
+    parser.add_argument("--progress_file", default="", help="Optional JSONL file updated after each scoring batch.")
     return parser.parse_args()
 
 
@@ -188,6 +189,22 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def build_progress_callback(progress_file: str):
+    if not progress_file:
+        return None
+    path = Path(progress_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+
+    def callback(event: dict) -> None:
+        event = dict(event)
+        event["time"] = time.time()
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    return callback
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
     args = parse_args()
@@ -208,6 +225,7 @@ def main() -> None:
         instruction=instruction,
         sort_by_length=args.sort_by_length,
         sort_descending=args.sort_descending,
+        progress_callback=build_progress_callback(args.progress_file),
     )
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(scores))

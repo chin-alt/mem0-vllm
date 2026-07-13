@@ -16,6 +16,8 @@ SORT_DESCENDING="${SORT_DESCENDING:-0}"
 EXPECTED_FBETA_BETAS="${EXPECTED_FBETA_BETAS:-0.2 0.3 0.5 0.7 1.0}"
 DEVICES="${DEVICES:-auto}"
 NUM_SHARDS="${NUM_SHARDS:-auto}"
+SHOW_PROGRESS="${SHOW_PROGRESS:-1}"
+PROGRESS_POLL_INTERVAL="${PROGRESS_POLL_INTERVAL:-1.0}"
 
 EXTRA_ARGS=()
 if [[ "${LOCAL_FILES_ONLY}" == "1" ]]; then
@@ -23,6 +25,11 @@ if [[ "${LOCAL_FILES_ONLY}" == "1" ]]; then
 fi
 if [[ "${SORT_DESCENDING}" == "1" ]]; then
   EXTRA_ARGS+=(--sort_descending)
+fi
+if [[ "${SHOW_PROGRESS}" == "1" ]]; then
+  EXTRA_ARGS+=(--show_progress)
+else
+  EXTRA_ARGS+=(--no_show_progress)
 fi
 read -r -a BETA_ARGS <<< "${EXPECTED_FBETA_BETAS}"
 
@@ -38,6 +45,7 @@ read -r -a BETA_ARGS <<< "${EXPECTED_FBETA_BETAS}"
   --max_num_seqs "${MAX_NUM_SEQS}" \
   --devices "${DEVICES}" \
   --num_shards "${NUM_SHARDS}" \
+  --progress_poll_interval "${PROGRESS_POLL_INTERVAL}" \
   --expected_fbeta_betas "${BETA_ARGS[@]}" \
   --sort_by_length \
   "${EXTRA_ARGS[@]}"

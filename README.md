@@ -1078,9 +1078,39 @@ EXPECTED_FBETA_BETAS="0.2 0.3 0.5 0.7 1.0" \
 bash scripts/eval_cmteb_r_vllm_dp.sh
 ```
 
+The data-parallel runner shows one aggregate progress bar in the main terminal.
+Set `SHOW_PROGRESS=0` to hide it, or tune refresh frequency with
+`PROGRESS_POLL_INTERVAL=0.5`.
+
 Data-parallel shard logs and intermediate outputs are kept under
 `OUTPUT_DIR/_dp_shards/shard_*/`. The merged root `OUTPUT_DIR` contains the same
 files as the single-process evaluator, plus `shard_metrics.jsonl`.
+
+If long-tail documents make later batches too slow, prepare a shorter 10%
+query-group subset first:
+
+```bash
+INPUT_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates.jsonl \
+OUTPUT_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates_10pct_short.jsonl \
+SAMPLE_RATIO=0.10 \
+SEED=42 \
+MAX_DOC_CHARS=2048 \
+MAX_DOCS_PER_QUERY=0 \
+bash scripts/prepare_fast_eval_subset.sh
+```
+
+Then point the evaluator to the subset:
+
+```bash
+TEST_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates_10pct_short.jsonl \
+OUTPUT_DIR=outputs/cmteb_r_qwen3_embedding_vllm_4b_dp_10pct \
+bash scripts/eval_cmteb_r_vllm_dp.sh
+```
+
+Sampling is done by query group, not by individual row, so each sampled query
+keeps its candidate list and ranking metrics remain meaningful. Set
+`DROP_IF_PAIR_CHARS_GT` to drop pairs that are still too long after truncation,
+or `MAX_DOCS_PER_QUERY` to cap the candidate count per query.
 
 This writes the normal ranking outputs plus dynamic-cutoff reports:
 

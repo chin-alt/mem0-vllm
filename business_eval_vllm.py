@@ -386,6 +386,7 @@ def score_with_vllm(
     instruction: str,
     sort_by_length: bool,
     sort_descending: bool = False,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[float]:
     if len(queries) != len(documents):
         raise ValueError(f"queries/documents length mismatch: {len(queries)} != {len(documents)}")
@@ -429,11 +430,22 @@ def score_with_vllm(
             raise ValueError(f"vLLM returned {len(outputs)} outputs for {len(batch)} input pairs")
         for (original_idx, _, _, _), output in zip(batch, outputs, strict=True):
             scores[original_idx] = extract_vllm_score(output)
+        completed = min(start + len(batch), len(indexed))
         progress.set_postfix(
-            scored=min(start + len(batch), len(indexed)),
+            scored=completed,
             max_chars=batch_max_chars,
             sec=f"{batch_seconds:.2f}",
         )
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "completed": completed,
+                    "total": len(indexed),
+                    "batch_size": len(batch),
+                    "batch_seconds": batch_seconds,
+                    "max_chars": batch_max_chars,
+                }
+            )
 
     final_scores: list[float] = []
     bad_values = 0

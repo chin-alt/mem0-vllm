@@ -11,6 +11,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from tqdm.auto import tqdm
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(PROJECT_ROOT) not in sys.path:
@@ -63,6 +65,9 @@ def parse_args() -> argparse.Namespace:
         help="Number of data-parallel shards. auto equals the number of selected devices.",
     )
     parser.add_argument("--python_bin", default=sys.executable)
+    parser.add_argument("--show_progress", action="store_true", default=True)
+    parser.add_argument("--no_show_progress", dest="show_progress", action="store_false")
+    parser.add_argument("--progress_poll_interval", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -116,7 +121,12 @@ def split_records_by_group(test_file: str, num_shards: int) -> list[list[dict[st
     return shards
 
 
-def build_worker_command(args: argparse.Namespace, shard_input: Path, shard_output: Path) -> list[str]:
+def build_worker_command(
+    args: argparse.Namespace,
+    shard_input: Path,
+    shard_output: Path,
+    progress_file: Path,
+) -> list[str]:
     cmd = [
         args.python_bin,
         str(PROJECT_ROOT / "src" / "evaluate_jsonl_vllm.py"),
@@ -126,6 +136,8 @@ def build_worker_command(args: argparse.Namespace, shard_input: Path, shard_outp
         args.model_path,
         "--output_dir",
         str(shard_output),
+        "--progress_file",
+        str(progress_file),
         "--max_length",
         str(args.max_length),
         "--batch_size",
@@ -169,6 +181,66 @@ def tail_text(path: Path, max_lines: int = 80) -> str:
     return "\n".join(lines[-max_lines:])
 
 
+def read_latest_progress(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {}
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def monitor_workers(processes: list[dict[str, Any]], total_records: int, poll_interval: float, show_progress: bool) -> None:
+    if not show_progress:
+        for item in processes:
+            item["process"].wait()
+        return
+
+    with tqdm(total=total_records, desc="DP vLLM scoring", unit="pair", dynamic_ncols=True, ascii=True) as progress:
+        while True:
+            completed = 0
+            postfix_parts = []
+            all_done = True
+            for item in processes:
+                latest = read_latest_progress(item["progress_path"])
+                shard_completed = int(latest.get("completed") or 0)
+                shard_total = int(latest.get("total") or item["records"])
+                shard_completed = min(shard_completed, shard_total)
+                completed += shard_completed
+                postfix_parts.append(f"s{item['shard_id']}:{shard_completed}/{shard_total}")
+                if item["process"].poll() is None:
+                    all_done = False
+            progress.n = min(completed, total_records)
+            progress.set_postfix_str(" ".join(postfix_parts[:4]))
+            progress.refresh()
+            if all_done:
+                final_completed = 0
+                final_parts = []
+                for item in processes:
+                    latest = read_latest_progress(item["progress_path"])
+                    shard_total = int(latest.get("total") or item["records"])
+                    shard_completed = int(latest.get("completed") or shard_total)
+                    shard_completed = min(shard_completed, shard_total)
+                    final_completed += shard_completed
+                    final_parts.append(f"s{item['shard_id']}:{shard_completed}/{shard_total}")
+                progress.n = min(final_completed, total_records)
+                progress.set_postfix_str(" ".join(final_parts[:4]))
+                progress.refresh()
+                break
+            time.sleep(max(0.1, poll_interval))
+
+
 def run_workers(args: argparse.Namespace, devices: list[str], shards: list[list[dict[str, Any]]], output_dir: Path) -> float:
     shard_root = output_dir / "_dp_shards"
     shard_root.mkdir(parents=True, exist_ok=True)
@@ -185,8 +257,9 @@ def run_workers(args: argparse.Namespace, devices: list[str], shards: list[list[
         shard_input = shard_dir / "input.jsonl"
         shard_output = shard_dir / "output"
         log_path = shard_dir / "worker.log"
+        progress_path = shard_dir / "progress.jsonl"
         write_jsonl(shard_input, records)
-        cmd = build_worker_command(args, shard_input, shard_output)
+        cmd = build_worker_command(args, shard_input, shard_output, progress_path)
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = device
         env["MEMRANKER_DP_SHARD_ID"] = str(shard_id)
@@ -209,13 +282,23 @@ def run_workers(args: argparse.Namespace, devices: list[str], shards: list[list[
                 "process": process,
                 "log_f": log_f,
                 "log_path": log_path,
+                "progress_path": progress_path,
                 "output_dir": shard_output,
             }
         )
 
+    monitor_workers(
+        processes,
+        total_records=sum(item["records"] for item in processes),
+        poll_interval=args.progress_poll_interval,
+        show_progress=args.show_progress,
+    )
+
     failed: list[dict[str, Any]] = []
     for item in processes:
-        return_code = item["process"].wait()
+        return_code = item["process"].poll()
+        if return_code is None:
+            return_code = item["process"].wait()
         item["log_f"].close()
         if return_code != 0:
             item["return_code"] = return_code
