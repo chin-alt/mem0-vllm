@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import heapq
 import json
 import logging
 import math
+import os
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -40,24 +42,63 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qrels_input_dir", default="")
     parser.add_argument("--qrels_dataset_suffix", default="-qrels")
     parser.add_argument("--datasets", nargs="+", default=DEFAULT_DATASETS)
-    parser.add_argument("--output_file", default="data/cmteb_r/cmteb_r_bm25_candidates.jsonl")
+    parser.add_argument("--output_file", default="data/cmteb_r/cmteb_r_qwen3_embedding_candidates.jsonl")
     parser.add_argument("--metadata_file", default="")
     parser.add_argument("--instruction", default=DEFAULT_INSTRUCTION)
     parser.add_argument("--candidate_top_k", type=int, default=100)
+    parser.add_argument(
+        "--retrieval_backend",
+        choices=["embedding", "bm25"],
+        default="embedding",
+        help="First-stage retriever. Use embedding to mirror dense-retrieval + reranker refinement.",
+    )
     parser.add_argument("--max_queries_per_dataset", type=int, default=1000)
     parser.add_argument("--doc_max_chars", type=int, default=0, help="0 keeps full document text in output.")
     parser.add_argument(
         "--index_doc_max_chars",
         type=int,
         default=2048,
-        help="Characters indexed per document for BM25. 0 indexes full documents.",
+        help="Characters used per document for first-stage retrieval. 0 uses full documents.",
     )
+    parser.add_argument("--embedding_model_name_or_path", default="Qwen/Qwen3-Embedding-0.6B")
+    parser.add_argument(
+        "--embedding_query_instruction",
+        default="Given a Chinese search query, retrieve relevant passages that answer the query.",
+    )
+    parser.add_argument(
+        "--embedding_query_template",
+        default="Instruct: {instruction}\nQuery: {query}",
+        help="Prompt template used only for embedding queries. Available fields: instruction, query.",
+    )
+    parser.add_argument("--embedding_batch_size", type=int, default=32)
+    parser.add_argument("--embedding_search_batch_size", type=int, default=64)
+    parser.add_argument("--embedding_max_length", type=int, default=512)
+    parser.add_argument("--embedding_device", default="auto", help="auto, cpu, cuda, cuda:0, etc.")
+    parser.add_argument(
+        "--embedding_dtype",
+        choices=["auto", "float16", "bfloat16", "float32"],
+        default="auto",
+        help="Torch dtype hint for loading the embedding model when supported by sentence-transformers.",
+    )
+    parser.add_argument("--embedding_cache_dir", default="", help="Optional directory for cached corpus embeddings.")
+    parser.add_argument(
+        "--embedding_local_files_only",
+        action="store_true",
+        help="Load the embedding model from local files/cache only.",
+    )
+    parser.add_argument(
+        "--no_embedding_normalize",
+        dest="embedding_normalize",
+        action="store_false",
+        help="Disable L2-normalization before dense dot-product retrieval.",
+    )
+    parser.set_defaults(embedding_normalize=True)
     parser.add_argument("--k1", type=float, default=1.2)
     parser.add_argument("--b", type=float, default=0.75)
     parser.add_argument(
         "--ensure_positives",
         action="store_true",
-        help="Append qrels positives missed by BM25. Off by default for realistic first-stage recall.",
+        help="Append qrels positives missed by retrieval. Off by default for realistic first-stage recall.",
     )
     return parser.parse_args()
 
@@ -122,10 +163,173 @@ class BM25Index:
         return heapq.nlargest(top_k, scores.items(), key=lambda item: (item[1], -item[0]))
 
 
+class EmbeddingEncoder:
+    def __init__(self, args: argparse.Namespace):
+        if args.embedding_local_files_only:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise ImportError(
+                "Embedding retrieval requires sentence-transformers. "
+                "Install requirements-cmteb.txt or set --retrieval_backend bm25."
+            ) from exc
+
+        device = None if args.embedding_device == "auto" else args.embedding_device
+        model_kwargs: dict[str, Any] = {}
+        if args.embedding_dtype != "auto":
+            try:
+                import torch
+
+                model_kwargs["torch_dtype"] = {
+                    "float16": torch.float16,
+                    "bfloat16": torch.bfloat16,
+                    "float32": torch.float32,
+                }[args.embedding_dtype]
+            except ImportError:
+                logger.warning("torch is not importable; ignoring --embedding_dtype=%s", args.embedding_dtype)
+
+        kwargs: dict[str, Any] = {"trust_remote_code": True}
+        if device is not None:
+            kwargs["device"] = device
+        if args.embedding_local_files_only:
+            kwargs["local_files_only"] = True
+        if model_kwargs:
+            kwargs["model_kwargs"] = model_kwargs
+
+        logger.info("Loading embedding model: %s", args.embedding_model_name_or_path)
+        try:
+            self.model = SentenceTransformer(args.embedding_model_name_or_path, **kwargs)
+        except TypeError:
+            # Older sentence-transformers releases do not accept every loading kwarg.
+            kwargs.pop("local_files_only", None)
+            kwargs.pop("model_kwargs", None)
+            self.model = SentenceTransformer(args.embedding_model_name_or_path, **kwargs)
+
+        if args.embedding_max_length > 0 and hasattr(self.model, "max_seq_length"):
+            self.model.max_seq_length = args.embedding_max_length
+        self.args = args
+
+    def format_query(self, query: str) -> str:
+        instruction = self.args.embedding_query_instruction or self.args.instruction
+        try:
+            return self.args.embedding_query_template.format(instruction=instruction, query=query)
+        except KeyError as exc:
+            raise ValueError(f"Unknown field in --embedding_query_template: {exc}") from exc
+
+    def encode(self, texts: list[str], batch_size: int, desc: str) -> Any:
+        logger.info("%s: encoding %d texts", desc, len(texts))
+        return self.model.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress_bar=True,
+            convert_to_numpy=True,
+            normalize_embeddings=self.args.embedding_normalize,
+        )
+
+
+class EmbeddingRetriever:
+    def __init__(
+        self,
+        dataset_name: str,
+        doc_ids: list[str],
+        docs: list[str],
+        encoder: EmbeddingEncoder,
+        args: argparse.Namespace,
+    ):
+        self.dataset_name = dataset_name
+        self.doc_ids = doc_ids
+        self.docs = docs
+        self.encoder = encoder
+        self.args = args
+        self.doc_embeddings = self._load_or_encode_doc_embeddings()
+
+    def _cache_paths(self) -> tuple[Path, Path] | None:
+        if not self.args.embedding_cache_dir:
+            return None
+        cache_dir = Path(self.args.embedding_cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_payload = {
+            "dataset": self.dataset_name,
+            "model": self.args.embedding_model_name_or_path,
+            "max_length": self.args.embedding_max_length,
+            "index_doc_max_chars": self.args.index_doc_max_chars,
+            "normalize": self.args.embedding_normalize,
+            "num_docs": len(self.doc_ids),
+        }
+        digest = hashlib.sha1(json.dumps(cache_payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+        model_name = re.sub(r"[^A-Za-z0-9._-]+", "_", self.args.embedding_model_name_or_path).strip("_")
+        prefix = f"{self.dataset_name}.{model_name[-80:]}.{digest}"
+        return cache_dir / f"{prefix}.embeddings.npy", cache_dir / f"{prefix}.doc_ids.json"
+
+    def _load_or_encode_doc_embeddings(self) -> Any:
+        import numpy as np
+
+        cache_paths = self._cache_paths()
+        if cache_paths is not None:
+            emb_path, ids_path = cache_paths
+            if emb_path.exists() and ids_path.exists():
+                cached_ids = json.loads(ids_path.read_text(encoding="utf-8"))
+                if cached_ids == self.doc_ids:
+                    logger.info("Loading cached corpus embeddings from %s", emb_path)
+                    return np.load(emb_path).astype("float32", copy=False)
+                logger.warning("Ignoring embedding cache with mismatched document ids: %s", ids_path)
+
+        index_docs = [
+            doc if self.args.index_doc_max_chars <= 0 else doc[: self.args.index_doc_max_chars]
+            for doc in self.docs
+        ]
+        embeddings = self.encoder.encode(
+            index_docs,
+            batch_size=self.args.embedding_batch_size,
+            desc=f"Encoding corpus {self.dataset_name}",
+        ).astype("float32", copy=False)
+        if cache_paths is not None:
+            emb_path, ids_path = cache_paths
+            np.save(emb_path, embeddings)
+            ids_path.write_text(json.dumps(self.doc_ids, ensure_ascii=False), encoding="utf-8")
+            logger.info("Saved corpus embedding cache to %s", emb_path)
+        return embeddings
+
+    def search_batch(self, queries: list[str], top_k: int) -> list[list[tuple[int, float]]]:
+        import numpy as np
+
+        if top_k <= 0 or not queries:
+            return [[] for _ in queries]
+        top_k = min(top_k, len(self.doc_ids))
+        query_texts = [self.encoder.format_query(query) for query in queries]
+        query_embeddings = self.encoder.encode(
+            query_texts,
+            batch_size=self.args.embedding_batch_size,
+            desc=f"Encoding queries {self.dataset_name}",
+        ).astype("float32", copy=False)
+
+        results: list[list[tuple[int, float]]] = []
+        batch_size = max(1, self.args.embedding_search_batch_size)
+        iterator = range(0, len(query_embeddings), batch_size)
+        for start in tqdm(iterator, desc=f"Dense retrieval {self.dataset_name}", unit="batch", dynamic_ncols=True, ascii=True):
+            batch = query_embeddings[start : start + batch_size]
+            scores = batch @ self.doc_embeddings.T
+            if top_k >= scores.shape[1]:
+                top_indices = np.argsort(-scores, axis=1)
+            else:
+                partial = np.argpartition(-scores, kth=top_k - 1, axis=1)[:, :top_k]
+                partial_scores = np.take_along_axis(scores, partial, axis=1)
+                order = np.argsort(-partial_scores, axis=1)
+                top_indices = np.take_along_axis(partial, order, axis=1)
+            top_scores = np.take_along_axis(scores, top_indices, axis=1)
+            for idx_row, score_row in zip(top_indices, top_scores):
+                results.append([(int(doc_idx), float(score)) for doc_idx, score in zip(idx_row, score_row)])
+        return results
+
+
 def build_dataset_candidates(
     name: str,
     root: Path,
     args: argparse.Namespace,
+    embedding_encoder: EmbeddingEncoder | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     corpus_rows = read_split(root, "corpus")
     query_rows = read_split(root, "queries")
@@ -141,34 +345,47 @@ def build_dataset_candidates(
     corpus_ids = list(corpus)
     docs = [corpus[doc_id] for doc_id in corpus_ids]
     doc_id_to_index = {doc_id: idx for idx, doc_id in enumerate(corpus_ids)}
-    bm25 = BM25Index(
-        corpus_ids,
-        docs,
-        k1=args.k1,
-        b=args.b,
-        index_doc_max_chars=args.index_doc_max_chars,
-    )
+    if args.retrieval_backend == "embedding":
+        if embedding_encoder is None:
+            raise ValueError("embedding_encoder is required when --retrieval_backend embedding")
+        retriever = EmbeddingRetriever(name, corpus_ids, docs, embedding_encoder, args)
+    else:
+        retriever = BM25Index(
+            corpus_ids,
+            docs,
+            k1=args.k1,
+            b=args.b,
+            index_doc_max_chars=args.index_doc_max_chars,
+        )
 
     records: list[dict[str, Any]] = []
-    query_count = 0
+    eligible_queries: list[tuple[str, str, list[str]]] = []
     skipped_no_qrels = 0
     skipped_no_candidates = 0
     total_true_relevant = 0
     total_candidate_relevant = 0
 
-    for query_row in tqdm(query_rows, desc=f"Building candidates {name}", unit="query", dynamic_ncols=True, ascii=True):
+    for query_row in query_rows:
         qid = row_id(query_row)
         query = row_text(query_row, is_doc=False)
         positive_ids = [doc_id for doc_id in qrels.get(qid, {}) if doc_id in corpus]
         if not query or not positive_ids:
             skipped_no_qrels += 1
             continue
-
-        query_count += 1
-        if args.max_queries_per_dataset > 0 and query_count > args.max_queries_per_dataset:
+        if args.max_queries_per_dataset > 0 and len(eligible_queries) >= args.max_queries_per_dataset:
             break
+        eligible_queries.append((qid, query, positive_ids))
 
-        ranked = bm25.search(query, args.candidate_top_k)
+    queries = [query for _qid, query, _positive_ids in eligible_queries]
+    if args.retrieval_backend == "embedding":
+        ranked_by_query = retriever.search_batch(queries, args.candidate_top_k)
+    else:
+        ranked_by_query = [
+            retriever.search(query, args.candidate_top_k)
+            for query in tqdm(queries, desc=f"Building BM25 candidates {name}", unit="query", dynamic_ncols=True, ascii=True)
+        ]
+
+    for (qid, query, positive_ids), ranked in zip(eligible_queries, ranked_by_query):
         candidate_doc_indices = [doc_idx for doc_idx, _score in ranked]
         retrieval_scores = {doc_idx: float(score) for doc_idx, score in ranked}
         if args.ensure_positives:
@@ -199,9 +416,14 @@ def build_dataset_candidates(
                     "query": query,
                     "doc": corpus[doc_id],
                     "labels": 10.0 if is_positive else 0.0,
-                    "reason": "cmteb_r_retrieved_positive" if is_positive else "cmteb_r_retrieved_negative",
+                    "reason": (
+                        f"cmteb_r_{args.retrieval_backend}_retrieved_positive"
+                        if is_positive
+                        else f"cmteb_r_{args.retrieval_backend}_retrieved_negative"
+                    ),
                     "retrieval_rank": rank,
                     "retrieval_score": retrieval_scores.get(doc_idx, 0.0),
+                    "retrieval_backend": args.retrieval_backend,
                     "true_relevant_count": len(positive_ids),
                     "candidate_relevant_count": candidate_relevant_count,
                 }
@@ -218,6 +440,10 @@ def build_dataset_candidates(
         "num_qrels_queries": len(qrels),
         "num_queries_exported": len({row["query_id"] for row in records}),
         "num_records": len(records),
+        "retrieval_backend": args.retrieval_backend,
+        "embedding_model_name_or_path": args.embedding_model_name_or_path
+        if args.retrieval_backend == "embedding"
+        else None,
         "candidate_top_k": args.candidate_top_k,
         "ensure_positives": args.ensure_positives,
         "skipped_no_qrels": skipped_no_qrels,
@@ -242,13 +468,18 @@ def main() -> None:
         "input_dir": str(input_dir),
         "qrels_input_dir": args.qrels_input_dir,
         "output_file": str(output_file),
+        "retrieval_backend": args.retrieval_backend,
+        "embedding_model_name_or_path": args.embedding_model_name_or_path
+        if args.retrieval_backend == "embedding"
+        else None,
         "candidate_top_k": args.candidate_top_k,
         "max_queries_per_dataset": args.max_queries_per_dataset,
         "datasets": [],
     }
+    embedding_encoder = EmbeddingEncoder(args) if args.retrieval_backend == "embedding" else None
     for dataset in args.datasets:
         root = dataset_dir(input_dir, dataset)
-        records, meta = build_dataset_candidates(dataset.split("/", 1)[-1], root, args)
+        records, meta = build_dataset_candidates(dataset.split("/", 1)[-1], root, args, embedding_encoder)
         all_records.extend(records)
         metadata["datasets"].append(meta)
 

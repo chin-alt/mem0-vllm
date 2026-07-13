@@ -987,27 +987,38 @@ test. For a stricter retrieval benchmark, use a fixed first-stage retriever run
 as the candidate set and score those candidates with the same evaluator.
 
 For a business-like CMTEB-R reranker evaluation, build a first-stage candidate
-list from the corpus first. The BM25 builder uses qrels only for labels; by
-default it does not force missed positives into the candidate set:
+list from the corpus first, then score only those candidates with the reranker.
+The default builder uses `Qwen/Qwen3-Embedding-0.6B` to retrieve top-100
+candidates and uses qrels only for labels/metrics. It does not force missed
+positives into the candidate set, so first-stage recall loss remains visible:
 
 ```bash
 INPUT_DIR=data/cmteb_r \
 QRELS_INPUT_DIR=data/cmteb_r \
-OUTPUT_FILE=data/cmteb_r/cmteb_r_bm25_candidates.jsonl \
+OUTPUT_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates.jsonl \
 DATASETS="T2Retrieval" \
+RETRIEVAL_BACKEND=embedding \
+EMBEDDING_MODEL_NAME_OR_PATH=/path/to/Qwen3-Embedding-0.6B \
+EMBEDDING_LOCAL_FILES_ONLY=1 \
+EMBEDDING_CACHE_DIR=data/cmteb_r/embedding_cache \
 CANDIDATE_TOP_K=100 \
 MAX_QUERIES_PER_DATASET=1000 \
 INDEX_DOC_MAX_CHARS=2048 \
 bash scripts/build_cmteb_r_candidates.sh
 ```
 
+If you want the script to download/cache the embedding model from Hugging Face,
+use `EMBEDDING_MODEL_NAME_OR_PATH=Qwen/Qwen3-Embedding-0.6B` and omit
+`EMBEDDING_LOCAL_FILES_ONLY=1`. To run the older lexical baseline instead, set
+`RETRIEVAL_BACKEND=bm25`.
+
 Then rerank that candidate file:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-TEST_FILE=data/cmteb_r/cmteb_r_bm25_candidates.jsonl \
+TEST_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates.jsonl \
 MODEL_PATH=/path/to/Qwen3-Reranker-4B \
-OUTPUT_DIR=outputs/cmteb_r_bm25_vllm_4b \
+OUTPUT_DIR=outputs/cmteb_r_qwen3_embedding_vllm_4b \
 MAX_LENGTH=2048 \
 BATCH_SIZE=64 \
 EXPECTED_FBETA_BETAS="0.2 0.3 0.5 0.7 1.0" \
