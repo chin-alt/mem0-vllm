@@ -75,6 +75,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embedding_max_length", type=int, default=512)
     parser.add_argument("--embedding_device", default="auto", help="auto, cpu, cuda, cuda:0, etc.")
     parser.add_argument(
+        "--embedding_multi_process",
+        action="store_true",
+        help="Use sentence-transformers multi-process encoding, typically one worker per GPU.",
+    )
+    parser.add_argument(
+        "--embedding_devices",
+        default="",
+        help="Comma-separated devices for multi-process encoding, e.g. cuda:0,cuda:1. Empty lets sentence-transformers decide.",
+    )
+    parser.add_argument(
+        "--embedding_chunk_size",
+        type=int,
+        default=0,
+        help="Chunk size for multi-process encoding. 0 lets sentence-transformers choose.",
+    )
+    parser.add_argument(
+        "--embedding_search_device",
+        default="auto",
+        help="Device for dense top-k search: auto, cpu, cuda, cuda:0, etc. auto uses CUDA when available.",
+    )
+    parser.add_argument(
+        "--embedding_search_dtype",
+        choices=["auto", "float16", "bfloat16", "float32"],
+        default="auto",
+        help="Torch dtype for GPU dense top-k search. auto uses float16 on CUDA and float32 on CPU.",
+    )
+    parser.add_argument(
         "--embedding_dtype",
         choices=["auto", "float16", "bfloat16", "float32"],
         default="auto",
@@ -211,6 +238,7 @@ class EmbeddingEncoder:
         if args.embedding_max_length > 0 and hasattr(self.model, "max_seq_length"):
             self.model.max_seq_length = args.embedding_max_length
         self.args = args
+        self._pool: Any | None = None
 
     def format_query(self, query: str) -> str:
         instruction = self.args.embedding_query_instruction or self.args.instruction
@@ -219,14 +247,56 @@ class EmbeddingEncoder:
         except KeyError as exc:
             raise ValueError(f"Unknown field in --embedding_query_template: {exc}") from exc
 
+    def _target_devices(self) -> list[str] | None:
+        if self.args.embedding_devices.strip():
+            return [device.strip() for device in self.args.embedding_devices.split(",") if device.strip()]
+        return None
+
+    def _get_pool(self) -> Any:
+        if self._pool is None:
+            devices = self._target_devices()
+            logger.info("Starting multi-process embedding pool on devices: %s", devices or "auto")
+            self._pool = self.model.start_multi_process_pool(target_devices=devices)
+        return self._pool
+
+    def close(self) -> None:
+        if self._pool is not None:
+            logger.info("Stopping multi-process embedding pool")
+            self.model.stop_multi_process_pool(self._pool)
+            self._pool = None
+
+    def _maybe_normalize(self, embeddings: Any) -> Any:
+        if not self.args.embedding_normalize:
+            return embeddings
+        import numpy as np
+
+        array = np.asarray(embeddings, dtype="float32")
+        norms = np.linalg.norm(array, axis=1, keepdims=True)
+        return array / np.maximum(norms, 1e-12)
+
     def encode(self, texts: list[str], batch_size: int, desc: str) -> Any:
         logger.info("%s: encoding %d texts", desc, len(texts))
-        return self.model.encode(
-            texts,
-            batch_size=batch_size,
-            show_progress_bar=True,
-            convert_to_numpy=True,
-            normalize_embeddings=self.args.embedding_normalize,
+        if self.args.embedding_multi_process:
+            kwargs: dict[str, Any] = {
+                "batch_size": batch_size,
+                "normalize_embeddings": self.args.embedding_normalize,
+            }
+            if self.args.embedding_chunk_size > 0:
+                kwargs["chunk_size"] = self.args.embedding_chunk_size
+            try:
+                return self._maybe_normalize(self.model.encode_multi_process(texts, self._get_pool(), **kwargs))
+            except TypeError:
+                kwargs.pop("normalize_embeddings", None)
+                return self._maybe_normalize(self.model.encode_multi_process(texts, self._get_pool(), **kwargs))
+
+        return self._maybe_normalize(
+            self.model.encode(
+                texts,
+                batch_size=batch_size,
+                show_progress_bar=True,
+                convert_to_numpy=True,
+                normalize_embeddings=self.args.embedding_normalize,
+            )
         )
 
 
@@ -305,11 +375,40 @@ class EmbeddingRetriever:
             batch_size=self.args.embedding_batch_size,
             desc=f"Encoding queries {self.dataset_name}",
         ).astype("float32", copy=False)
+        if self.args.embedding_multi_process:
+            # Free worker model memory before optional GPU matrix search.
+            self.encoder.close()
 
+        return self._search_embeddings(query_embeddings, top_k)
+
+    def _search_embeddings(self, query_embeddings: Any, top_k: int) -> list[list[tuple[int, float]]]:
+        if self.args.embedding_search_device == "cpu":
+            return self._search_embeddings_numpy(query_embeddings, top_k)
+        try:
+            return self._search_embeddings_torch(query_embeddings, top_k)
+        except ImportError:
+            logger.warning("torch is not importable; falling back to CPU numpy dense retrieval")
+            return self._search_embeddings_numpy(query_embeddings, top_k)
+        except RuntimeError as exc:
+            if "CUDA" not in str(exc) and "cuda" not in str(exc):
+                raise
+            logger.warning("GPU dense retrieval failed (%s); falling back to CPU numpy dense retrieval", exc)
+            return self._search_embeddings_numpy(query_embeddings, top_k)
+
+    def _search_embeddings_numpy(self, query_embeddings: Any, top_k: int) -> list[list[tuple[int, float]]]:
+        import numpy as np
+
+        logger.info("Running dense top-k search on CPU with numpy")
         results: list[list[tuple[int, float]]] = []
         batch_size = max(1, self.args.embedding_search_batch_size)
         iterator = range(0, len(query_embeddings), batch_size)
-        for start in tqdm(iterator, desc=f"Dense retrieval {self.dataset_name}", unit="batch", dynamic_ncols=True, ascii=True):
+        for start in tqdm(
+            iterator,
+            desc=f"Dense retrieval {self.dataset_name}",
+            unit="batch",
+            dynamic_ncols=True,
+            ascii=True,
+        ):
             batch = query_embeddings[start : start + batch_size]
             scores = batch @ self.doc_embeddings.T
             if top_k >= scores.shape[1]:
@@ -322,6 +421,50 @@ class EmbeddingRetriever:
             top_scores = np.take_along_axis(scores, top_indices, axis=1)
             for idx_row, score_row in zip(top_indices, top_scores):
                 results.append([(int(doc_idx), float(score)) for doc_idx, score in zip(idx_row, score_row)])
+        return results
+
+    def _search_embeddings_torch(self, query_embeddings: Any, top_k: int) -> list[list[tuple[int, float]]]:
+        import torch
+
+        if self.args.embedding_search_device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            device = self.args.embedding_search_device
+        if device == "cpu":
+            return self._search_embeddings_numpy(query_embeddings, top_k)
+
+        dtype_name = self.args.embedding_search_dtype
+        if dtype_name == "auto":
+            dtype = torch.float16 if str(device).startswith("cuda") else torch.float32
+        else:
+            dtype = {
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16,
+                "float32": torch.float32,
+            }[dtype_name]
+
+        logger.info("Running dense top-k search on %s with torch dtype=%s", device, dtype)
+        doc_embeddings = torch.as_tensor(self.doc_embeddings, device=device, dtype=dtype).T.contiguous()
+        results: list[list[tuple[int, float]]] = []
+        batch_size = max(1, self.args.embedding_search_batch_size)
+        iterator = range(0, len(query_embeddings), batch_size)
+        with torch.no_grad():
+            for start in tqdm(
+                iterator,
+                desc=f"Dense retrieval {self.dataset_name}",
+                unit="batch",
+                dynamic_ncols=True,
+                ascii=True,
+            ):
+                batch = torch.as_tensor(query_embeddings[start : start + batch_size], device=device, dtype=dtype)
+                scores = batch @ doc_embeddings
+                top_scores, top_indices = torch.topk(scores, k=top_k, dim=1, largest=True, sorted=True)
+                for idx_row, score_row in zip(top_indices.cpu().tolist(), top_scores.float().cpu().tolist()):
+                    results.append([(int(doc_idx), float(score)) for doc_idx, score in zip(idx_row, score_row)])
+                del batch, scores, top_scores, top_indices
+        del doc_embeddings
+        if str(device).startswith("cuda"):
+            torch.cuda.empty_cache()
         return results
 
 
@@ -444,6 +587,9 @@ def build_dataset_candidates(
         "embedding_model_name_or_path": args.embedding_model_name_or_path
         if args.retrieval_backend == "embedding"
         else None,
+        "embedding_multi_process": args.embedding_multi_process if args.retrieval_backend == "embedding" else None,
+        "embedding_devices": args.embedding_devices if args.retrieval_backend == "embedding" else None,
+        "embedding_search_device": args.embedding_search_device if args.retrieval_backend == "embedding" else None,
         "candidate_top_k": args.candidate_top_k,
         "ensure_positives": args.ensure_positives,
         "skipped_no_qrels": skipped_no_qrels,
@@ -472,16 +618,23 @@ def main() -> None:
         "embedding_model_name_or_path": args.embedding_model_name_or_path
         if args.retrieval_backend == "embedding"
         else None,
+        "embedding_multi_process": args.embedding_multi_process if args.retrieval_backend == "embedding" else None,
+        "embedding_devices": args.embedding_devices if args.retrieval_backend == "embedding" else None,
+        "embedding_search_device": args.embedding_search_device if args.retrieval_backend == "embedding" else None,
         "candidate_top_k": args.candidate_top_k,
         "max_queries_per_dataset": args.max_queries_per_dataset,
         "datasets": [],
     }
     embedding_encoder = EmbeddingEncoder(args) if args.retrieval_backend == "embedding" else None
-    for dataset in args.datasets:
-        root = dataset_dir(input_dir, dataset)
-        records, meta = build_dataset_candidates(dataset.split("/", 1)[-1], root, args, embedding_encoder)
-        all_records.extend(records)
-        metadata["datasets"].append(meta)
+    try:
+        for dataset in args.datasets:
+            root = dataset_dir(input_dir, dataset)
+            records, meta = build_dataset_candidates(dataset.split("/", 1)[-1], root, args, embedding_encoder)
+            all_records.extend(records)
+            metadata["datasets"].append(meta)
+    finally:
+        if embedding_encoder is not None:
+            embedding_encoder.close()
 
     write_jsonl(output_file, all_records)
     metadata["num_records"] = len(all_records)

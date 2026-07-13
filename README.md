@@ -1001,6 +1001,7 @@ RETRIEVAL_BACKEND=embedding \
 EMBEDDING_MODEL_NAME_OR_PATH=/path/to/Qwen3-Embedding-0.6B \
 EMBEDDING_LOCAL_FILES_ONLY=1 \
 EMBEDDING_CACHE_DIR=data/cmteb_r/embedding_cache \
+EMBEDDING_SEARCH_DEVICE=cuda \
 CANDIDATE_TOP_K=100 \
 MAX_QUERIES_PER_DATASET=1000 \
 INDEX_DOC_MAX_CHARS=2048 \
@@ -1011,6 +1012,35 @@ If you want the script to download/cache the embedding model from Hugging Face,
 use `EMBEDDING_MODEL_NAME_OR_PATH=Qwen/Qwen3-Embedding-0.6B` and omit
 `EMBEDDING_LOCAL_FILES_ONLY=1`. To run the older lexical baseline instead, set
 `RETRIEVAL_BACKEND=bm25`.
+
+For faster candidate building on multi-GPU machines, let sentence-transformers
+encode corpus/query embeddings with one worker per GPU and keep the top-k search
+on GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+INPUT_DIR=data/cmteb_r \
+QRELS_INPUT_DIR=data/cmteb_r \
+OUTPUT_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates.jsonl \
+DATASETS="T2Retrieval" \
+RETRIEVAL_BACKEND=embedding \
+EMBEDDING_MODEL_NAME_OR_PATH=/path/to/Qwen3-Embedding-0.6B \
+EMBEDDING_LOCAL_FILES_ONLY=1 \
+EMBEDDING_MULTI_PROCESS=1 \
+EMBEDDING_DEVICES=cuda:0,cuda:1,cuda:2,cuda:3 \
+EMBEDDING_BATCH_SIZE=64 \
+EMBEDDING_CHUNK_SIZE=2000 \
+EMBEDDING_SEARCH_DEVICE=cuda:0 \
+EMBEDDING_SEARCH_DTYPE=float16 \
+CANDIDATE_TOP_K=100 \
+MAX_QUERIES_PER_DATASET=1000 \
+bash scripts/build_cmteb_r_candidates.sh
+```
+
+The first run still needs to encode the corpus; later runs reuse
+`EMBEDDING_CACHE_DIR`, so changing only `MAX_QUERIES_PER_DATASET` or the reranker
+model should be much faster. If GPU memory is tight, reduce
+`EMBEDDING_BATCH_SIZE` or set `EMBEDDING_SEARCH_DEVICE=cpu`.
 
 Then rerank that candidate file:
 

@@ -16,6 +16,11 @@ EMBEDDING_BATCH_SIZE="${EMBEDDING_BATCH_SIZE:-32}"
 EMBEDDING_SEARCH_BATCH_SIZE="${EMBEDDING_SEARCH_BATCH_SIZE:-64}"
 EMBEDDING_MAX_LENGTH="${EMBEDDING_MAX_LENGTH:-512}"
 EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-auto}"
+EMBEDDING_MULTI_PROCESS="${EMBEDDING_MULTI_PROCESS:-0}"
+EMBEDDING_DEVICES="${EMBEDDING_DEVICES:-}"
+EMBEDDING_CHUNK_SIZE="${EMBEDDING_CHUNK_SIZE:-0}"
+EMBEDDING_SEARCH_DEVICE="${EMBEDDING_SEARCH_DEVICE:-auto}"
+EMBEDDING_SEARCH_DTYPE="${EMBEDDING_SEARCH_DTYPE:-auto}"
 EMBEDDING_DTYPE="${EMBEDDING_DTYPE:-auto}"
 EMBEDDING_CACHE_DIR="${EMBEDDING_CACHE_DIR:-data/cmteb_r/embedding_cache}"
 EMBEDDING_LOCAL_FILES_ONLY="${EMBEDDING_LOCAL_FILES_ONLY:-0}"
@@ -30,6 +35,9 @@ if [[ "${ENSURE_POSITIVES}" == "1" ]]; then
 fi
 if [[ "${EMBEDDING_LOCAL_FILES_ONLY}" == "1" ]]; then
   EXTRA_ARGS+=(--embedding_local_files_only)
+fi
+if [[ "${EMBEDDING_MULTI_PROCESS}" == "1" ]]; then
+  EXTRA_ARGS+=(--embedding_multi_process)
 fi
 
 "${PYTHON_BIN}" src/build_cmteb_r_candidates.py \
@@ -48,6 +56,10 @@ fi
   --embedding_search_batch_size "${EMBEDDING_SEARCH_BATCH_SIZE}" \
   --embedding_max_length "${EMBEDDING_MAX_LENGTH}" \
   --embedding_device "${EMBEDDING_DEVICE}" \
+  --embedding_devices "${EMBEDDING_DEVICES}" \
+  --embedding_chunk_size "${EMBEDDING_CHUNK_SIZE}" \
+  --embedding_search_device "${EMBEDDING_SEARCH_DEVICE}" \
+  --embedding_search_dtype "${EMBEDDING_SEARCH_DTYPE}" \
   --embedding_dtype "${EMBEDDING_DTYPE}" \
   --embedding_cache_dir "${EMBEDDING_CACHE_DIR}" \
   --instruction "${INSTRUCTION}" \
