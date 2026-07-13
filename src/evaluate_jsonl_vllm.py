@@ -42,6 +42,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_enable_prefix_caching", dest="enable_prefix_caching", action="store_false")
     parser.add_argument("--sort_by_length", action="store_true", default=True)
     parser.add_argument("--no_sort_by_length", dest="sort_by_length", action="store_false")
+    parser.add_argument("--sort_descending", action="store_true")
+    parser.add_argument("--local_files_only", action="store_true")
     return parser.parse_args()
 
 
@@ -72,6 +74,7 @@ def main() -> None:
         batch_size=args.batch_size,
         instruction=instruction,
         sort_by_length=args.sort_by_length,
+        sort_descending=args.sort_descending,
     )
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(scores))
@@ -112,6 +115,9 @@ def main() -> None:
             "tensor_parallel_size": args.tensor_parallel_size,
             "max_num_batched_tokens": args.max_num_batched_tokens,
             "max_num_seqs": args.max_num_seqs,
+            "sort_by_length": args.sort_by_length,
+            "sort_descending": args.sort_descending,
+            "local_files_only": args.local_files_only,
             "score_time_seconds": float(score_time),
             "seconds_per_example": float(sec_per_example),
             "examples_per_second": float(examples_per_sec),

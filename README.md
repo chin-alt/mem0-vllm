@@ -962,6 +962,18 @@ MAX_NUM_SEQS=64 \
 bash scripts/eval_cmteb_r_vllm.sh
 ```
 
+`scripts/eval_cmteb_r_vllm.sh` reads the model from `MODEL_PATH`. Variables such
+as `MODEL_NAME_OR_PATH` are not used by this script. The script defaults to
+`LOCAL_FILES_ONLY=1`, so a typo in a local path fails immediately instead of
+falling back to a Hugging Face download attempt. To allow a remote HF id, set
+`LOCAL_FILES_ONLY=0`.
+
+If the progress bar appears to get slower over time, check the `max_chars` and
+`sec` postfix printed for each vLLM batch. With `--sort_by_length`, shorter
+pairs are scored first and longer pairs are scored later, so later batches can
+naturally be slower. Use `SORT_DESCENDING=1` to score long batches first, or
+`--no_sort_by_length` for unsorted batches.
+
 Both evaluators write:
 
 ```text

@@ -17,7 +17,9 @@ Environment overrides:
   MAX_NUM_BATCHED_TOKENS   vLLM max_num_batched_tokens. Default: 32768
   MAX_NUM_SEQS             vLLM max_num_seqs. Default: 256
   SORT_BY_LENGTH           Sort pairs by query+doc length before scoring. Default: 1
+  SORT_DESCENDING          Score longer pairs first when sorting. Default: 0
   ENABLE_PREFIX_CACHING    Enable vLLM prefix caching if supported. Default: 1
+  LOCAL_FILES_ONLY         Force offline local model loading. Default: 1
   SKIP_EXISTING            Skip a run if metrics.json already exists. Default: 1
   CONTINUE_ON_ERROR        Continue remaining runs after one failure. Default: 0
   POST_RUN_SLEEP           Seconds to wait after each run. Default: 2
@@ -62,7 +64,9 @@ TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 SORT_BY_LENGTH="${SORT_BY_LENGTH:-1}"
+SORT_DESCENDING="${SORT_DESCENDING:-0}"
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
+LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-1}"
 INSTRUCTION="${INSTRUCTION:-Given a user query, retrieve relevant documents that answer the query.}"
 GT_QUERY_COL="${GT_QUERY_COL:-query}"
 TOP_K_LIST="${TOP_K_LIST:-1 3 5 10}"
@@ -118,12 +122,19 @@ if [[ "${SORT_BY_LENGTH}" == "1" ]]; then
 else
   sort_args+=(--no_sort_by_length)
 fi
+if [[ "${SORT_DESCENDING}" == "1" ]]; then
+  sort_args+=(--sort_descending)
+fi
 
 prefix_cache_args=()
 if [[ "${ENABLE_PREFIX_CACHING}" == "1" ]]; then
   prefix_cache_args+=(--enable_prefix_caching)
 else
   prefix_cache_args+=(--no_enable_prefix_caching)
+fi
+local_model_args=()
+if [[ "${LOCAL_FILES_ONLY}" == "1" ]]; then
+  local_model_args+=(--local_files_only)
 fi
 
 copy_named_outputs() {
@@ -186,7 +197,8 @@ run_one() {
     --expected_fbeta_beta "${EXPECTED_FBETA_BETA}" \
     --top_k_list "${TOP_K_ARGS[@]}" \
     "${sort_args[@]}" \
-    "${prefix_cache_args[@]}"
+    "${prefix_cache_args[@]}" \
+    "${local_model_args[@]}"
 
   copy_named_outputs "${run_dir}" "${run_name}"
   if [[ "${POST_RUN_SLEEP}" != "0" ]]; then

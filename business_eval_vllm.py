@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import math
+import os
 import shutil
 import sys
 import time
@@ -119,6 +120,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_enable_prefix_caching", dest="enable_prefix_caching", action="store_false")
     parser.add_argument("--sort_by_length", action="store_true", default=True)
     parser.add_argument("--no_sort_by_length", dest="sort_by_length", action="store_false")
+    parser.add_argument("--sort_descending", action="store_true", help="Score longer pairs first when length sorting.")
+    parser.add_argument(
+        "--local_files_only",
+        action="store_true",
+        help="Force offline Hugging Face/Transformers loading and fail if --model_path is not local.",
+    )
     parser.add_argument(
         "--save_doc_text",
         action="store_true",
@@ -151,9 +158,22 @@ def filter_supported_kwargs(
     return supported
 
 
-def validate_vllm_model_path(model_path: str) -> None:
-    path = Path(model_path)
+def looks_like_local_path(model_path: str) -> bool:
+    text = model_path.strip()
+    return (
+        text.startswith(("/", "./", "../", "~"))
+        or "\\" in text
+        or Path(text).is_absolute()
+    )
+
+
+def validate_vllm_model_path(model_path: str, require_local: bool = False) -> None:
+    path = Path(model_path).expanduser()
     if not path.exists():
+        if require_local or looks_like_local_path(model_path):
+            raise FileNotFoundError(
+                f"--model_path looks like a local path but does not exist: {model_path}"
+            )
         return
     if path.is_file():
         return
@@ -224,6 +244,10 @@ def prepare_vllm_tokenizer_path(model_path: str, output_dir: str) -> str | None:
 
 
 def create_vllm_llm(args: argparse.Namespace) -> Any:
+    if getattr(args, "local_files_only", False):
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_DATASETS_OFFLINE"] = "1"
     try:
         import tokenizers
         import transformers
@@ -256,7 +280,7 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
             f"tokenizers=={tokenizers.__version__} is too new for vllm==0.10.2. "
             "Please use tokenizers>=0.21.1,<0.22.0 in the dedicated vLLM eval environment."
         )
-    validate_vllm_model_path(args.model_path)
+    validate_vllm_model_path(args.model_path, require_local=getattr(args, "local_files_only", False))
     tokenizer_path = prepare_vllm_tokenizer_path(args.model_path, args.output_dir)
 
     llm_kwargs: dict[str, Any] = {
@@ -361,6 +385,7 @@ def score_with_vllm(
     batch_size: int,
     instruction: str,
     sort_by_length: bool,
+    sort_descending: bool = False,
 ) -> list[float]:
     if len(queries) != len(documents):
         raise ValueError(f"queries/documents length mismatch: {len(queries)} != {len(documents)}")
@@ -374,7 +399,7 @@ def score_with_vllm(
         for idx, (query, document) in enumerate(zip(queries, documents, strict=True))
     ]
     if sort_by_length:
-        indexed.sort(key=lambda item: item[3])
+        indexed.sort(key=lambda item: item[3], reverse=sort_descending)
 
     scores: list[float | None] = [None] * len(indexed)
     score_kwargs = build_score_call_kwargs(llm, instruction=instruction)
@@ -391,17 +416,24 @@ def score_with_vllm(
         batch = indexed[start : start + batch_size]
         batch_queries = [item[1] for item in batch]
         batch_documents = [item[2] for item in batch]
+        batch_max_chars = max(item[3] for item in batch)
         formatted_queries, formatted_documents = format_qwen3_score_inputs(
             batch_queries,
             batch_documents,
             instruction=instruction,
         )
+        batch_start_time = time.perf_counter()
         outputs = llm.score(formatted_queries, formatted_documents, **score_kwargs)
+        batch_seconds = time.perf_counter() - batch_start_time
         if len(outputs) != len(batch):
             raise ValueError(f"vLLM returned {len(outputs)} outputs for {len(batch)} input pairs")
         for (original_idx, _, _, _), output in zip(batch, outputs, strict=True):
             scores[original_idx] = extract_vllm_score(output)
-        progress.set_postfix(scored=min(start + len(batch), len(indexed)))
+        progress.set_postfix(
+            scored=min(start + len(batch), len(indexed)),
+            max_chars=batch_max_chars,
+            sec=f"{batch_seconds:.2f}",
+        )
 
     final_scores: list[float] = []
     bad_values = 0
@@ -459,6 +491,7 @@ def main() -> None:
         batch_size=args.batch_size,
         instruction=args.instruction,
         sort_by_length=args.sort_by_length,
+        sort_descending=args.sort_descending,
     )
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(scores))
@@ -495,6 +528,8 @@ def main() -> None:
             "max_num_batched_tokens": args.max_num_batched_tokens,
             "max_num_seqs": args.max_num_seqs,
             "sort_by_length": args.sort_by_length,
+            "sort_descending": args.sort_descending,
+            "local_files_only": args.local_files_only,
             "score_time_seconds": float(score_time),
             "seconds_per_example": float(sec_per_example),
             "examples_per_second": float(examples_per_sec),
