@@ -21,7 +21,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from data import load_examples, read_json_records, write_jsonl  # noqa: E402
-from evaluate_jsonl_vllm import compute_dynamic_beta_metrics, write_csv  # noqa: E402
+from evaluate_jsonl_vllm import compute_dynamic_beta_metrics, compute_inverted_score_diagnostics, write_csv  # noqa: E402
 from metrics import add_group_ranks, compute_all_metrics  # noqa: E402
 from modeling import DEFAULT_MODEL_NAME  # noqa: E402
 
@@ -42,6 +42,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--instruction", default="")
     parser.add_argument("--max_length", type=int, default=2048)
     parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument(
+        "--scoring_backend",
+        choices=["pooling", "generate"],
+        default="pooling",
+        help=(
+            "pooling uses vLLM LLM.score with Qwen3ForSequenceClassification override. "
+            "generate uses the official Qwen3-Reranker yes/no logprob prompt path."
+        ),
+    )
     parser.add_argument("--relevance_threshold", type=float, default=0.7)
     parser.add_argument("--dtype", choices=["auto", "bfloat16", "float16", "float32"], default="float16")
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.80)
@@ -142,6 +151,8 @@ def build_worker_command(
         str(args.max_length),
         "--batch_size",
         str(args.batch_size),
+        "--scoring_backend",
+        args.scoring_backend,
         "--relevance_threshold",
         str(args.relevance_threshold),
         "--dtype",
@@ -355,6 +366,7 @@ def merge_outputs(
         query_key="group_key",
         relevance_threshold=args.relevance_threshold,
     )
+    overall.update(compute_inverted_score_diagnostics(rows, args.relevance_threshold))
     beta_per_query, beta_summary, beta_overall = compute_dynamic_beta_metrics(
         rows,
         betas=args.expected_fbeta_betas,
@@ -364,7 +376,8 @@ def merge_outputs(
     overall.update(
         {
             "backend": "vllm_data_parallel",
-            "vllm_runner": "pooling",
+            "vllm_runner": "pooling" if args.scoring_backend == "pooling" else "generate",
+            "scoring_backend": args.scoring_backend,
             "model_path": args.model_path,
             "test_file": args.test_file,
             "max_length": args.max_length,

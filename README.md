@@ -747,6 +747,16 @@ recall parsing, metrics, and output filenames as `src/evaluate_business.py`, but
 replaces the local Transformers scorer with `vllm==0.10.2`
 `LLM(..., runner="pooling").score()`.
 
+The vLLM evaluator now has two scoring backends:
+
+```text
+SCORING_BACKEND=pooling    fast path; uses Qwen3ForSequenceClassification + classifier_from_token
+SCORING_BACKEND=generate   official Qwen3-Reranker path; generates one yes/no token and reads logprobs
+```
+
+Use `generate` to rule out model-class or scoring-head problems. It is slower,
+but it does not depend on the pooling runner or sequence-classification override.
+
 Install vLLM dependencies on the Linux GPU machine:
 
 ```bash
@@ -791,6 +801,7 @@ python business_eval_vllm.py \
   --output_dir outputs/business_eval_vllm_2048_bs256 \
   --max_length 2048 \
   --batch_size 256 \
+  --scoring_backend generate \
   --dtype bfloat16 \
   --gpu_memory_utilization 0.90 \
   --tensor_parallel_size 1 \
@@ -811,6 +822,12 @@ TENSOR_PARALLEL_SIZE=2 \
 MAX_NUM_BATCHED_TOKENS=8192 \
 MAX_NUM_SEQS=64 \
 bash scripts/eval_business_matrix_vllm.sh
+```
+
+For matrix experiments, set the same environment variable:
+
+```bash
+SCORING_BACKEND=generate bash scripts/eval_business_matrix_vllm.sh
 ```
 
 The vLLM matrix writes the same per-run files plus
@@ -955,6 +972,7 @@ MODEL_PATH=/path/to/Qwen3-Reranker-4B \
 OUTPUT_DIR=outputs/cmteb_r_vllm_4b \
 MAX_LENGTH=2048 \
 BATCH_SIZE=64 \
+SCORING_BACKEND=generate \
 DTYPE=float16 \
 TENSOR_PARALLEL_SIZE=2 \
 MAX_NUM_BATCHED_TOKENS=8192 \
@@ -967,6 +985,13 @@ as `MODEL_NAME_OR_PATH` are not used by this script. The script defaults to
 `LOCAL_FILES_ONLY=1`, so a typo in a local path fails immediately instead of
 falling back to a Hugging Face download attempt. To allow a remote HF id, set
 `LOCAL_FILES_ONLY=0`.
+
+For inference-debug runs, compare `SCORING_BACKEND=pooling` with
+`SCORING_BACKEND=generate` on the same candidate file. If Qwen3-Reranker stays
+high but MemReranker only drops under `pooling`, suspect the vLLM pooling
+model-class/scoring-head path. If MemReranker is low under both backends, the
+drop is more likely from fine-tuning/data/domain effects than from score
+extraction.
 
 If the progress bar appears to get slower over time, check the `max_chars` and
 `sec` postfix printed for each vLLM batch. With `--sort_by_length`, shorter
@@ -1130,6 +1155,69 @@ candidate list for that query. The evaluator also reports
 model-ranked list at that ideal candidate count. `CandidateRecall` uses the full
 qrels positive count as denominator, so first-stage misses and length-filter
 misses are visible in the final report.
+
+## LoCoMo Reranker Evaluation
+
+LoCoMo `locomo10.json` is a long-term conversation QA benchmark. For reranker
+evaluation, do not use `answer` as the document. The correct retrieval unit is
+the conversation turn referenced by `qa[].evidence`:
+
+```text
+query = qa[].question
+positive doc ids = qa[].evidence, for example D1:3
+candidate docs = all dialogue turns from the same sample.conversation
+doc text = session time + speaker + turn text + optional BLIP image caption
+```
+
+The converter below builds a realistic two-stage setup: first retrieve top-100
+candidate turns inside each conversation with Qwen3-Embedding, then label the
+candidates whose `dia_id` appears in `evidence` as positive. Missed evidence is
+not appended by default, so `CandidateRecall` tells you how many gold evidence
+turns survived first-stage retrieval.
+
+```bash
+INPUT_FILE=data/locomo/locomo10.json \
+OUTPUT_FILE=data/locomo/locomo_qwen3_embedding_candidates.jsonl \
+RETRIEVAL_BACKEND=embedding \
+EMBEDDING_MODEL_NAME_OR_PATH=/home/c50061497/MemOS/src/memos/reranker/memranker/models/Qwen3-Embedding-0.6B \
+EMBEDDING_LOCAL_FILES_ONLY=1 \
+CANDIDATE_TOP_K=100 \
+bash scripts/prepare_locomo_reranker.sh
+```
+
+For a quick parser-only smoke test without the embedding model, use BM25:
+
+```bash
+INPUT_FILE=data/locomo/locomo10.json \
+OUTPUT_FILE=data/locomo/locomo_bm25_candidates.jsonl \
+RETRIEVAL_BACKEND=bm25 \
+CANDIDATE_TOP_K=100 \
+bash scripts/prepare_locomo_reranker.sh
+```
+
+The output JSONL is compatible with the same vLLM/DP evaluator used by CMTEB-R:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+DEVICES=0,1,2,3 \
+NUM_SHARDS=4 \
+TEST_FILE=data/locomo/locomo_qwen3_embedding_candidates.jsonl \
+MODEL_PATH=/home/c50061497/MemOS/src/memos/reranker/memranker/models/IAAR-Shanghai/MemReranker-4B \
+OUTPUT_DIR=outputs/locomo_memreranker_4b_vllm_dp \
+MAX_LENGTH=2048 \
+BATCH_SIZE=64 \
+EXPECTED_FBETA_BETAS="0.2 0.3 0.5 0.7 1.0" \
+bash scripts/eval_cmteb_r_vllm_dp.sh
+```
+
+Useful converter switches:
+
+```text
+ENSURE_POSITIVES=1          append missed evidence turns for oracle-style reranker-only analysis
+MAX_SAMPLES=1               debug one LoCoMo conversation
+MAX_QUERIES=20              debug first 20 QA groups
+INCLUDE_ANSWER_METADATA=1   keep answer fields as metadata only, never as model input
+```
 
 ## Prediction
 

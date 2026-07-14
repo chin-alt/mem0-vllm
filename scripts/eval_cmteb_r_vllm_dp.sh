@@ -6,6 +6,7 @@ MODEL_PATH="${MODEL_PATH:-models/Qwen3-Reranker-4B}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/cmteb_r_vllm_dp_eval}"
 MAX_LENGTH="${MAX_LENGTH:-2048}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
+SCORING_BACKEND="${SCORING_BACKEND:-pooling}"
 DTYPE="${DTYPE:-float16}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.80}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
@@ -39,6 +40,7 @@ read -r -a BETA_ARGS <<< "${EXPECTED_FBETA_BETAS}"
   --output_dir "${OUTPUT_DIR}" \
   --max_length "${MAX_LENGTH}" \
   --batch_size "${BATCH_SIZE}" \
+  --scoring_backend "${SCORING_BACKEND}" \
   --dtype "${DTYPE}" \
   --gpu_memory_utilization "${GPU_MEMORY_UTILIZATION}" \
   --max_num_batched_tokens "${MAX_NUM_BATCHED_TOKENS}" \

@@ -84,6 +84,21 @@ def format_qwen3_score_inputs(
     return formatted_queries, formatted_documents
 
 
+def format_qwen3_generate_prompts(
+    queries: list[str],
+    documents: list[str],
+    instruction: str,
+) -> list[str]:
+    """Format full prompts for the official Qwen3-Reranker vLLM logprob path."""
+    return [
+        (
+            f"{QWEN3_RERANKER_PREFIX}<Instruct>: {instruction}\n\n"
+            f"<Query>: {query}\n\n<Document>: {document}{QWEN3_RERANKER_SUFFIX}"
+        )
+        for query, document in zip(queries, documents, strict=True)
+    ]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate business recall data with vLLM offline LLM.score reranking."
@@ -100,6 +115,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recall_text_key", default="text")
     parser.add_argument("--max_length", type=int, default=2048)
     parser.add_argument("--batch_size", type=int, default=256, help="Chunk size for vLLM score().")
+    parser.add_argument(
+        "--scoring_backend",
+        choices=["pooling", "generate"],
+        default="pooling",
+        help=(
+            "pooling uses vLLM LLM.score with Qwen3ForSequenceClassification override. "
+            "generate uses the official Qwen3-Reranker yes/no logprob prompt path."
+        ),
+    )
     parser.add_argument("--top_k_list", type=int, nargs="+", default=[1, 3, 5, 10])
     parser.add_argument(
         "--expected_fbeta_beta",
@@ -283,10 +307,9 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
     validate_vllm_model_path(args.model_path, require_local=getattr(args, "local_files_only", False))
     tokenizer_path = prepare_vllm_tokenizer_path(args.model_path, args.output_dir)
 
+    scoring_backend = getattr(args, "scoring_backend", "pooling")
     llm_kwargs: dict[str, Any] = {
         "model": args.model_path,
-        "runner": "pooling",
-        "hf_overrides": QWEN3_RERANKER_HF_OVERRIDES,
         "dtype": args.dtype,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "tensor_parallel_size": args.tensor_parallel_size,
@@ -295,6 +318,9 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
         "max_num_seqs": args.max_num_seqs,
         "enable_prefix_caching": args.enable_prefix_caching,
     }
+    if scoring_backend == "pooling":
+        llm_kwargs["runner"] = "pooling"
+        llm_kwargs["hf_overrides"] = QWEN3_RERANKER_HF_OVERRIDES
     if tokenizer_path:
         llm_kwargs["tokenizer"] = tokenizer_path
     filtered_kwargs = filter_supported_kwargs(LLM, llm_kwargs, context="LLM")
@@ -303,7 +329,7 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
             "This model tokenizer_config needs compatibility patching, but the installed vLLM "
             "does not support the LLM(..., tokenizer=...) argument."
         )
-    if filtered_kwargs.get("runner") != "pooling":
+    if scoring_backend == "pooling" and filtered_kwargs.get("runner") != "pooling":
         raise RuntimeError(
             "This evaluator requires vLLM with LLM(..., runner='pooling'), "
             "which is supported by vllm==0.10.2. Please install requirements-vllm.txt."
@@ -312,6 +338,7 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
     llm = LLM(**filtered_kwargs)
     setattr(llm, "_memranker_vllm_version", getattr(vllm, "__version__", "unknown"))
     setattr(llm, "_memranker_vllm_tokenizer_path", tokenizer_path or "")
+    setattr(llm, "_memranker_scoring_backend", scoring_backend)
     return llm
 
 
@@ -378,6 +405,50 @@ def build_score_call_kwargs(llm: Any, instruction: str) -> dict[str, Any]:
     return filter_supported_kwargs(llm.score, requested_kwargs, context="LLM.score")
 
 
+def load_yes_no_token_ids(model_path: str, tokenizer_path: str = "", local_files_only: bool = False) -> tuple[int, int]:
+    from transformers import AutoTokenizer
+
+    load_path = tokenizer_path or model_path
+    tokenizer = AutoTokenizer.from_pretrained(
+        load_path,
+        trust_remote_code=True,
+        local_files_only=local_files_only,
+    )
+    yes_id = tokenizer("yes", add_special_tokens=False).input_ids[0]
+    no_id = tokenizer("no", add_special_tokens=False).input_ids[0]
+    logger.info("Resolved vLLM generate yes/no token ids: yes=%s no=%s", yes_id, no_id)
+    return int(yes_id), int(no_id)
+
+
+def extract_yes_no_score_from_generate_output(output: Any, yes_token_id: int, no_token_id: int) -> float:
+    generated = output.outputs[0]
+    if not getattr(generated, "logprobs", None):
+        raise ValueError(
+            "vLLM generate output has no logprobs. The generate scorer requires SamplingParams(logprobs=...)."
+        )
+    final_logprobs = generated.logprobs[-1]
+    yes_item = final_logprobs.get(yes_token_id)
+    no_item = final_logprobs.get(no_token_id)
+    yes_logprob = -10.0 if yes_item is None else float(yes_item.logprob)
+    no_logprob = -10.0 if no_item is None else float(no_item.logprob)
+    yes_prob = math.exp(yes_logprob)
+    no_prob = math.exp(no_logprob)
+    return float(yes_prob / max(yes_prob + no_prob, 1e-12))
+
+
+def build_generate_sampling_params(llm: Any, yes_token_id: int, no_token_id: int) -> Any:
+    from vllm import SamplingParams
+
+    requested_kwargs = {
+        "temperature": 0,
+        "max_tokens": 1,
+        "logprobs": 20,
+        "allowed_token_ids": [yes_token_id, no_token_id],
+    }
+    filtered_kwargs = filter_supported_kwargs(SamplingParams, requested_kwargs, context="SamplingParams")
+    return SamplingParams(**filtered_kwargs)
+
+
 def score_with_vllm(
     llm: Any,
     queries: list[str],
@@ -387,6 +458,9 @@ def score_with_vllm(
     sort_by_length: bool,
     sort_descending: bool = False,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    scoring_backend: str | None = None,
+    model_path: str = "",
+    local_files_only: bool = False,
 ) -> list[float]:
     if len(queries) != len(documents):
         raise ValueError(f"queries/documents length mismatch: {len(queries)} != {len(documents)}")
@@ -403,7 +477,21 @@ def score_with_vllm(
         indexed.sort(key=lambda item: item[3], reverse=sort_descending)
 
     scores: list[float | None] = [None] * len(indexed)
-    score_kwargs = build_score_call_kwargs(llm, instruction=instruction)
+    backend = scoring_backend or getattr(llm, "_memranker_scoring_backend", "pooling")
+    if backend not in {"pooling", "generate"}:
+        raise ValueError(f"Unsupported scoring backend: {backend}")
+    score_kwargs = build_score_call_kwargs(llm, instruction=instruction) if backend == "pooling" else {}
+    sampling_params = None
+    yes_token_id = None
+    no_token_id = None
+    if backend == "generate":
+        tokenizer_path = getattr(llm, "_memranker_vllm_tokenizer_path", "")
+        yes_token_id, no_token_id = load_yes_no_token_ids(
+            model_path or getattr(llm, "llm_engine", None) or "",
+            tokenizer_path=tokenizer_path,
+            local_files_only=local_files_only,
+        )
+        sampling_params = build_generate_sampling_params(llm, yes_token_id, no_token_id)
     total_batches = math.ceil(len(indexed) / batch_size)
     progress = tqdm(
         range(0, len(indexed), batch_size),
@@ -418,18 +506,31 @@ def score_with_vllm(
         batch_queries = [item[1] for item in batch]
         batch_documents = [item[2] for item in batch]
         batch_max_chars = max(item[3] for item in batch)
-        formatted_queries, formatted_documents = format_qwen3_score_inputs(
-            batch_queries,
-            batch_documents,
-            instruction=instruction,
-        )
         batch_start_time = time.perf_counter()
-        outputs = llm.score(formatted_queries, formatted_documents, **score_kwargs)
+        if backend == "pooling":
+            formatted_queries, formatted_documents = format_qwen3_score_inputs(
+                batch_queries,
+                batch_documents,
+                instruction=instruction,
+            )
+            outputs = llm.score(formatted_queries, formatted_documents, **score_kwargs)
+        else:
+            prompts = format_qwen3_generate_prompts(
+                batch_queries,
+                batch_documents,
+                instruction=instruction,
+            )
+            outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
         batch_seconds = time.perf_counter() - batch_start_time
         if len(outputs) != len(batch):
             raise ValueError(f"vLLM returned {len(outputs)} outputs for {len(batch)} input pairs")
         for (original_idx, _, _, _), output in zip(batch, outputs, strict=True):
-            scores[original_idx] = extract_vllm_score(output)
+            if backend == "pooling":
+                scores[original_idx] = extract_vllm_score(output)
+            else:
+                if yes_token_id is None or no_token_id is None:
+                    raise RuntimeError("Internal error: missing yes/no token ids for generate scoring")
+                scores[original_idx] = extract_yes_no_score_from_generate_output(output, yes_token_id, no_token_id)
         completed = min(start + len(batch), len(indexed))
         progress.set_postfix(
             scored=completed,
@@ -504,6 +605,9 @@ def main() -> None:
         instruction=args.instruction,
         sort_by_length=args.sort_by_length,
         sort_descending=args.sort_descending,
+        scoring_backend=args.scoring_backend,
+        model_path=args.model_path,
+        local_files_only=args.local_files_only,
     )
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(scores))
@@ -531,7 +635,8 @@ def main() -> None:
     metrics.update(
         {
             "backend": "vllm",
-            "vllm_runner": "pooling",
+            "vllm_runner": "pooling" if args.scoring_backend == "pooling" else "generate",
+            "scoring_backend": args.scoring_backend,
             "vllm_version": getattr(llm, "_memranker_vllm_version", "unknown"),
             "vllm_tokenizer_path": getattr(llm, "_memranker_vllm_tokenizer_path", ""),
             "dtype": args.dtype,

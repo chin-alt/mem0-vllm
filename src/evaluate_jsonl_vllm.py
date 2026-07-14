@@ -26,6 +26,18 @@ from modeling import DEFAULT_MODEL_NAME  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
+INVERTED_DIAGNOSTIC_KEYS = (
+    "MAP",
+    "MRR",
+    "NDCG@1",
+    "NDCG@3",
+    "NDCG@10",
+    "Recall@1",
+    "Recall@3",
+    "Recall@5",
+    "Pearson",
+    "Spearman",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +48,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--instruction", default="")
     parser.add_argument("--max_length", type=int, default=2048)
     parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument(
+        "--scoring_backend",
+        choices=["pooling", "generate"],
+        default="pooling",
+        help=(
+            "pooling uses vLLM LLM.score with Qwen3ForSequenceClassification override. "
+            "generate uses the official Qwen3-Reranker yes/no logprob prompt path."
+        ),
+    )
     parser.add_argument("--relevance_threshold", type=float, default=0.7)
     parser.add_argument("--dtype", choices=["auto", "bfloat16", "float16", "float32"], default="float16")
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.80)
@@ -220,6 +241,24 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def compute_inverted_score_diagnostics(rows: list[dict], relevance_threshold: float) -> dict[str, float]:
+    inverted_rows = []
+    for row in rows:
+        copied = dict(row)
+        copied["score"] = -float(copied.get("score", 0.0))
+        inverted_rows.append(copied)
+    inverted_overall, _ = compute_all_metrics(
+        inverted_rows,
+        query_key="group_key",
+        relevance_threshold=relevance_threshold,
+    )
+    return {
+        f"inverted_{key}": float(inverted_overall[key])
+        for key in INVERTED_DIAGNOSTIC_KEYS
+        if key in inverted_overall
+    }
+
+
 def build_progress_callback(progress_file: str):
     if not progress_file:
         return None
@@ -257,6 +296,9 @@ def main() -> None:
         sort_by_length=args.sort_by_length,
         sort_descending=args.sort_descending,
         progress_callback=build_progress_callback(args.progress_file),
+        scoring_backend=args.scoring_backend,
+        model_path=args.model_path,
+        local_files_only=args.local_files_only,
     )
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(scores))
@@ -288,6 +330,7 @@ def main() -> None:
         query_key="group_key",
         relevance_threshold=args.relevance_threshold,
     )
+    overall.update(compute_inverted_score_diagnostics(rows, args.relevance_threshold))
     beta_per_query, beta_summary, beta_overall = compute_dynamic_beta_metrics(
         rows,
         betas=args.expected_fbeta_betas,
@@ -296,7 +339,8 @@ def main() -> None:
     overall.update(
         {
             "backend": "vllm",
-            "vllm_runner": "pooling",
+            "vllm_runner": "pooling" if args.scoring_backend == "pooling" else "generate",
+            "scoring_backend": args.scoring_backend,
             "vllm_version": getattr(llm, "_memranker_vllm_version", "unknown"),
             "vllm_tokenizer_path": getattr(llm, "_memranker_vllm_tokenizer_path", ""),
             "model_path": args.model_path,

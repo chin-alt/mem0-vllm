@@ -10,6 +10,7 @@ Environment overrides:
   CUDA_VISIBLE_DEVICES     GPU ids for evaluation. Default: 0
   MAX_LENGTH               Max sequence length. Default: 2048
   BATCH_SIZE               vLLM LLM.score chunk size. Default: 256
+  SCORING_BACKEND          pooling or generate. Default: pooling
   EXPECTED_FBETA_BETA      Beta for dynamic Expected-Fbeta cutoff. Default: 0.3
   DTYPE                    auto, bfloat16, float16, or float32. Default: bfloat16
   GPU_MEMORY_UTILIZATION   vLLM GPU memory utilization. Default: 0.90
@@ -57,6 +58,7 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/business_matrix_vllm_${RUN_TAG}}"
 MAX_LENGTH="${MAX_LENGTH:-2048}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
+SCORING_BACKEND="${SCORING_BACKEND:-pooling}"
 EXPECTED_FBETA_BETA="${EXPECTED_FBETA_BETA:-0.3}"
 DTYPE="${DTYPE:-bfloat16}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
@@ -189,6 +191,7 @@ run_one() {
     --gt_doc_id_col "${gt_doc_id_col}" \
     --max_length "${MAX_LENGTH}" \
     --batch_size "${BATCH_SIZE}" \
+    --scoring_backend "${SCORING_BACKEND}" \
     --dtype "${DTYPE}" \
     --gpu_memory_utilization "${GPU_MEMORY_UTILIZATION}" \
     --tensor_parallel_size "${TENSOR_PARALLEL_SIZE}" \
