@@ -1219,6 +1219,40 @@ MAX_QUERIES=20              debug first 20 QA groups
 INCLUDE_ANSWER_METADATA=1   keep answer fields as metadata only, never as model input
 ```
 
+After evaluation, analyze LoCoMo by query/category and export bad cases:
+
+```bash
+EVAL_DIR=outputs/locomo_memreranker_4b_vllm_dp \
+TEST_FILE=data/locomo/locomo_qwen3_embedding_candidates.jsonl \
+BAD_NDCG_THRESHOLD=0.5 \
+BAD_RANK_THRESHOLD=10 \
+TOP_K=10 \
+bash scripts/analyze_locomo_results.sh
+```
+
+For older evaluation outputs, keep `TEST_FILE` set so the analyzer can join back
+LoCoMo metadata such as `category`, `evidence`, and `sample_id`. New evaluator
+outputs preserve these fields directly in `predictions.jsonl`.
+
+The analyzer writes:
+
+```text
+locomo_analysis/locomo_overall_summary.json
+locomo_analysis/locomo_category_summary.csv
+locomo_analysis/locomo_query_analysis.csv
+locomo_analysis/locomo_bad_cases.jsonl
+locomo_analysis/locomo_bad_cases.csv
+locomo_analysis/locomo_bad_case_report.md
+```
+
+`locomo_query_analysis.csv` has one row per QA query, including category,
+candidate recall, NDCG/Recall/MRR, the first relevant rank, evidence ids, and
+the model's top-1 document. `locomo_bad_cases.jsonl` keeps top-ranked document
+snippets and positive document snippets for diagnosis. A query is marked bad
+when first-stage retrieval misses all evidence, `NDCG@BAD_NDCG_K` is below
+`BAD_NDCG_THRESHOLD`, or the first positive rank is greater than
+`BAD_RANK_THRESHOLD`.
+
 ## Prediction
 
 Prepare `docs.jsonl`:

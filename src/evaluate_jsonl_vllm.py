@@ -38,6 +38,20 @@ INVERTED_DIAGNOSTIC_KEYS = (
     "Pearson",
     "Spearman",
 )
+PASSTHROUGH_METADATA_FIELDS = (
+    "dataset",
+    "sample_id",
+    "category",
+    "evidence",
+    "positive_doc_ids",
+    "dia_id",
+    "session",
+    "session_time",
+    "speaker",
+    "retrieval_backend",
+    "answer",
+    "adversarial_answer",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -306,24 +320,26 @@ def main() -> None:
 
     rows = []
     for ex, score, raw in zip(examples, scores, raw_records, strict=False):
-        rows.append(
-            {
-                "group_key": ex.group_key,
-                "query": ex.query,
-                "query_id": ex.query_id,
-                "qid": raw.get("qid", ""),
-                "doc_id": ex.doc_id,
-                "doc": ex.doc,
-                "label": ex.label,
-                "raw_label": ex.raw_label,
-                "score": float(score),
-                "retrieval_rank": raw.get("retrieval_rank"),
-                "retrieval_score": raw.get("retrieval_score"),
-                "true_relevant_count": raw.get("true_relevant_count"),
-                "candidate_relevant_count": raw.get("candidate_relevant_count"),
-                "reason": ex.reason,
-            }
-        )
+        row = {
+            "group_key": ex.group_key,
+            "query": ex.query,
+            "query_id": ex.query_id,
+            "qid": raw.get("qid", ""),
+            "doc_id": ex.doc_id,
+            "doc": ex.doc,
+            "label": ex.label,
+            "raw_label": ex.raw_label,
+            "score": float(score),
+            "retrieval_rank": raw.get("retrieval_rank"),
+            "retrieval_score": raw.get("retrieval_score"),
+            "true_relevant_count": raw.get("true_relevant_count"),
+            "candidate_relevant_count": raw.get("candidate_relevant_count"),
+            "reason": ex.reason,
+        }
+        for field in PASSTHROUGH_METADATA_FIELDS:
+            if field in raw:
+                row[field] = raw.get(field)
+        rows.append(row)
     rows = add_group_ranks(rows, query_key="group_key")
     overall, per_query = compute_all_metrics(
         rows,
