@@ -258,6 +258,114 @@ The script supports automatic model download from Hugging Face when the model
 name is used. If your cluster is offline, download the model first and pass the
 local path to `--model_name_or_path`.
 
+## ModernBERT BCE Baseline
+
+For an encoder baseline, this repo also supports ModernBERT pointwise BCE
+training. It uses the same JSON/JSONL data and the same soft labels:
+
+```text
+label = clip(labels / 10.0, 0, 1)
+loss  = BinaryCrossEntropyLoss(sequence_classification_logit, label)
+score = sigmoid(sequence_classification_logit)
+```
+
+This is not the Qwen3 yes/no-logit reranker path. The training script follows
+the Sentence-Transformers official reranker style:
+
+```text
+CrossEncoder("answerdotai/ModernBERT-base")
+CrossEncoderTrainer(...)
+BinaryCrossEntropyLoss(...)
+```
+
+The input is encoded as a text pair:
+
+```text
+text_a = instruction + "\n\nQuery: " + query
+text_b = document
+```
+
+By default this is a full fine-tune, matching the official CrossEncoder setup:
+all ModernBERT parameters are trainable unless the upstream model itself has
+frozen parameters. The script logs and writes parameter counts to:
+
+```text
+outputs/modernbert_pointwise/parameter_counts.json
+outputs/modernbert_pointwise/best/modernbert_reranker_config.json
+```
+
+Train with fixed split files:
+
+```bash
+TRAIN_FILE=data/split_seed42/train.jsonl \
+DEV_FILE=data/split_seed42/dev.jsonl \
+TEST_FILE=data/split_seed42/test.jsonl \
+MODEL_NAME_OR_PATH=answerdotai/ModernBERT-base \
+OUTPUT_DIR=outputs/modernbert_pointwise \
+MAX_LENGTH=2048 \
+PER_DEVICE_TRAIN_BATCH_SIZE=8 \
+ATTN_IMPLEMENTATION=sdpa \
+BF16=1 \
+bash scripts/train_modernbert_pointwise.sh
+```
+
+For multi-GPU training, launch through the same helper by setting
+`NUM_PROCESSES`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+NUM_PROCESSES=4 \
+TRAIN_FILE=data/split_seed42/train.jsonl \
+DEV_FILE=data/split_seed42/dev.jsonl \
+TEST_FILE=data/split_seed42/test.jsonl \
+MODEL_NAME_OR_PATH=answerdotai/ModernBERT-base \
+OUTPUT_DIR=outputs/modernbert_pointwise_4gpu \
+MAX_LENGTH=2048 \
+PER_DEVICE_TRAIN_BATCH_SIZE=4 \
+ATTN_IMPLEMENTATION=sdpa \
+BF16=1 \
+bash scripts/train_modernbert_pointwise.sh
+```
+
+If the model is already downloaded on the cluster, pass the local directory:
+
+```bash
+MODEL_NAME_OR_PATH=/path/to/ModernBERT-base \
+LOCAL_FILES_ONLY=1 \
+bash scripts/train_modernbert_pointwise.sh
+```
+
+Evaluate the ModernBERT checkpoint:
+
+```bash
+TEST_FILE=data/split_seed42/test.jsonl \
+MODEL_PATH=outputs/modernbert_pointwise/best \
+OUTPUT_DIR=outputs/modernbert_eval \
+BATCH_SIZE=16 \
+ATTN_IMPLEMENTATION=sdpa \
+BF16=1 \
+bash scripts/eval_modernbert.sh
+```
+
+Run one-query prediction:
+
+```bash
+python src/predict_modernbert.py \
+  --model_path outputs/modernbert_pointwise/best \
+  --instruction "Judge whether the document is useful for answering the query." \
+  --query "Which hotel I viewed is more worry-free for a family trip?" \
+  --docs_file data/docs.jsonl \
+  --output_file predictions_modernbert_ranked.json \
+  --top_k 10 \
+  --max_length 2048 \
+  --attn_implementation sdpa \
+  --bf16
+```
+
+ModernBERT supports long-context classification, but memory still grows with
+`max_length` and batch size. Start with `MAX_LENGTH=1024` or `2048`, then raise
+it only after the baseline is stable.
+
 ## Train 4B on 8 RTX 3090 GPUs
 
 Use the 8-GPU helper:
