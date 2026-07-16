@@ -28,6 +28,7 @@ BASE_COLUMNS = [
     "precision",
     "dtype",
     "attn_implementation",
+    "score_activation",
     "gpu_memory_utilization",
     "tensor_parallel_size",
     "max_num_batched_tokens",

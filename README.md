@@ -847,6 +847,54 @@ cuda_peak_reserved_mib        PyTorch caching allocator peak reservation
 These fields describe the current Python process. `cuda_peak_reserved_mib` is
 usually the cleaner headline number for "how much GPU memory this run needed".
 
+### CrossEncoder Business Matrix
+
+For ModernBERT or mBERT rerankers trained with the Sentence-Transformers
+`CrossEncoderTrainer`, use the CrossEncoder business matrix entry instead of
+the Qwen yes/no-logit matrix script:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+MODERNBERT_MODEL_PATH=/home/c50061497/MemOS/src/memos/reranker/memranker/outputs/modernbert_pointwise/best \
+MBERT_MODEL_PATH=/home/c50061497/MemOS/src/memos/reranker/memranker/outputs/mbert_pointwise/best \
+MAX_LENGTH=2048 \
+BATCH_SIZE=32 \
+PRECISION=bf16 \
+ATTN_IMPLEMENTATION=sdpa \
+SCORE_ACTIVATION=sigmoid \
+bash scripts/eval_business_matrix_crossencoder.sh
+```
+
+This script evaluates the same three business datasets:
+
+```text
+0428caption   gt_doc_id_col=PageId_new
+0428keyword   gt_doc_id_col=PageId_new
+0625caption   gt_doc_id_col=PageId
+```
+
+The two default model names are `modernbert` and `mbert`. To run an arbitrary
+set of CrossEncoder checkpoints, pass matching model names and paths:
+
+```bash
+MODEL_NAMES="modernbert mbert another_run" \
+MODEL_PATHS="/path/to/modernbert/best|/path/to/mbert/best|/path/to/another/best" \
+bash scripts/eval_business_matrix_crossencoder.sh
+```
+
+Outputs follow the same layout as the Qwen business matrix:
+
+```text
+<OUTPUT_ROOT>/<dataset>__<model>/metrics.json
+<OUTPUT_ROOT>/<dataset>__<model>/business_eval.xlsx
+<OUTPUT_ROOT>/summary_metrics.xlsx
+<OUTPUT_ROOT>/summary_metrics.csv
+<OUTPUT_ROOT>/summary_metrics.json
+```
+
+`SCORE_ACTIVATION=sigmoid` is the default and matches pointwise BCE soft-label
+training. Use `identity` only if you intentionally want raw CrossEncoder logits.
+
 ### vLLM Business Evaluation
 
 For faster offline scoring with Qwen3-Reranker sequence-classification support,
