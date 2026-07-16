@@ -4,6 +4,7 @@ import argparse
 import inspect
 import json
 import logging
+import os
 import random
 import shutil
 from pathlib import Path
@@ -83,6 +84,28 @@ def set_seed(seed: int) -> None:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+
+
+def get_rank() -> int:
+    for name in ("RANK", "LOCAL_RANK", "SLURM_PROCID"):
+        value = os.environ.get(name)
+        if value not in (None, ""):
+            try:
+                return int(value)
+            except ValueError:
+                continue
+    return 0
+
+
+def is_main_process() -> bool:
+    return get_rank() in (-1, 0)
+
+
+def destroy_distributed_if_needed() -> None:
+    if torch is None:
+        return
+    if hasattr(torch, "distributed") and torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 def torch_dtype_from_flags(args: argparse.Namespace) -> Any | None:
@@ -292,6 +315,8 @@ def model_device(model: Any) -> str:
 
 
 def save_metadata(args: argparse.Namespace, split_info: dict[str, Any], parameter_counts: dict[str, Any]) -> None:
+    if not is_main_process():
+        return
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     save_json(out / "training_args.json", vars(args))
@@ -310,7 +335,7 @@ def save_cross_encoder_checkpoint(
     final_dir = output_dir / "final"
     for path in (best_dir, final_dir):
         if path.exists():
-            shutil.rmtree(path)
+            shutil.rmtree(path, ignore_errors=True)
         path.mkdir(parents=True, exist_ok=True)
         cross_encoder.save_pretrained(str(path))
         save_json(
@@ -344,12 +369,13 @@ def main() -> None:
     splits, split_info = load_train_dev_test(args)
     if not splits["train"]:
         raise ValueError("Train split is empty.")
-    logger.info(
-        "Split sizes: train=%d dev=%d test=%d",
-        len(splits["train"]),
-        len(splits["dev"]),
-        len(splits["test"]),
-    )
+    if is_main_process():
+        logger.info(
+            "Split sizes: train=%d dev=%d test=%d",
+            len(splits["train"]),
+            len(splits["dev"]),
+            len(splits["test"]),
+        )
 
     CrossEncoder, CrossEncoderTrainer, CrossEncoderTrainingArguments, BinaryCrossEntropyLoss = import_cross_encoder_stack()
     cross_encoder = build_cross_encoder(args, CrossEncoder)
@@ -359,13 +385,14 @@ def main() -> None:
         raise RuntimeError("CrossEncoder did not expose a tokenizer; cannot run project evaluation.")
 
     parameter_counts = count_parameters(underlying_model)
-    logger.info(
-        "ModernBERT parameter counts: total=%d trainable=%d frozen=%d trainable_ratio=%.6f",
-        parameter_counts["total_parameters"],
-        parameter_counts["trainable_parameters"],
-        parameter_counts["frozen_parameters"],
-        parameter_counts["trainable_ratio"],
-    )
+    if is_main_process():
+        logger.info(
+            "ModernBERT parameter counts: total=%d trainable=%d frozen=%d trainable_ratio=%.6f",
+            parameter_counts["total_parameters"],
+            parameter_counts["trainable_parameters"],
+            parameter_counts["frozen_parameters"],
+            parameter_counts["trainable_ratio"],
+        )
     save_metadata(args, split_info, parameter_counts)
 
     train_dataset = examples_to_hf_dataset(splits["train"])
@@ -383,6 +410,11 @@ def main() -> None:
     }
     trainer = CrossEncoderTrainer(**filter_kwargs(CrossEncoderTrainer.__init__, trainer_kwargs))
     trainer.train()
+
+    if not is_main_process():
+        logger.info("Rank %d finished training; skipping final evaluation and checkpoint export.", get_rank())
+        destroy_distributed_if_needed()
+        return
 
     metrics: dict[str, Any] = {}
     eval_for_metrics = eval_examples or splits["train"]
@@ -408,6 +440,7 @@ def main() -> None:
     )
     save_cross_encoder_checkpoint(cross_encoder, args, metrics, parameter_counts)
     logger.info("Training complete. Metrics: %s", json.dumps(metrics, ensure_ascii=False))
+    destroy_distributed_if_needed()
 
 
 if __name__ == "__main__":
