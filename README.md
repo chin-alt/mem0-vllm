@@ -1312,6 +1312,45 @@ model-ranked list at that ideal candidate count. `CandidateRecall` uses the full
 qrels positive count as denominator, so first-stage misses and length-filter
 misses are visible in the final report.
 
+### CMTEB-R CrossEncoder Evaluation
+
+For ModernBERT or mBERT checkpoints trained with `CrossEncoderTrainer`, use the
+CrossEncoder JSONL evaluator instead of the Qwen/vLLM evaluator:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+TEST_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates.jsonl \
+MODERNBERT_MODEL_PATH=outputs/modernbert_pointwise/best \
+MBERT_MODEL_PATH=outputs/mbert_pointwise/best \
+MAX_LENGTH=2048 \
+BATCH_SIZE=32 \
+PRECISION=bf16 \
+ATTN_IMPLEMENTATION=sdpa \
+SCORE_ACTIVATION=sigmoid \
+EXPECTED_FBETA_BETAS="0.2 0.3 0.5 0.7 1.0" \
+bash scripts/eval_cmteb_r_crossencoder.sh
+```
+
+The script evaluates both default model names, `modernbert` and `mbert`, and
+writes one run directory per model plus a summary table:
+
+```text
+outputs/cmteb_r_crossencoder_<timestamp>/cmteb_r__modernbert/overall_metrics.json
+outputs/cmteb_r_crossencoder_<timestamp>/cmteb_r__mbert/overall_metrics.json
+outputs/cmteb_r_crossencoder_<timestamp>/summary_metrics.xlsx
+```
+
+To run arbitrary CrossEncoder checkpoints:
+
+```bash
+MODEL_NAMES="modernbert mbert another_run" \
+MODEL_PATHS="/path/to/modernbert/best|/path/to/mbert/best|/path/to/another/best" \
+bash scripts/eval_cmteb_r_crossencoder.sh
+```
+
+`SCORE_ACTIVATION=sigmoid` matches pointwise BCE soft-label training. Use
+`identity` only if you intentionally want raw CrossEncoder logits.
+
 ## LoCoMo Reranker Evaluation
 
 LoCoMo `locomo10.json` is a long-term conversation QA benchmark. For reranker
@@ -1408,6 +1447,40 @@ snippets and positive document snippets for diagnosis. A query is marked bad
 when first-stage retrieval misses all evidence, `NDCG@BAD_NDCG_K` is below
 `BAD_NDCG_THRESHOLD`, or the first positive rank is greater than
 `BAD_RANK_THRESHOLD`.
+
+### LoCoMo CrossEncoder Evaluation
+
+The same ModernBERT/mBERT CrossEncoder checkpoints can be evaluated on LoCoMo
+candidate JSONL with automatic category and bad-case analysis:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+TEST_FILE=data/locomo/locomo_qwen3_embedding_candidates.jsonl \
+MODERNBERT_MODEL_PATH=outputs/modernbert_pointwise/best \
+MBERT_MODEL_PATH=outputs/mbert_pointwise/best \
+MAX_LENGTH=2048 \
+BATCH_SIZE=32 \
+PRECISION=bf16 \
+ATTN_IMPLEMENTATION=sdpa \
+SCORE_ACTIVATION=sigmoid \
+TOP_K=10 \
+BAD_NDCG_THRESHOLD=0.5 \
+BAD_RANK_THRESHOLD=10 \
+bash scripts/eval_locomo_crossencoder.sh
+```
+
+Each model output directory contains the standard JSONL ranking outputs and the
+LoCoMo analysis folder:
+
+```text
+outputs/locomo_crossencoder_<timestamp>/locomo__modernbert/overall_metrics.json
+outputs/locomo_crossencoder_<timestamp>/locomo__modernbert/predictions.jsonl
+outputs/locomo_crossencoder_<timestamp>/locomo__modernbert/locomo_analysis/
+outputs/locomo_crossencoder_<timestamp>/summary_metrics.xlsx
+```
+
+The summary table includes ranking metrics, dynamic beta metrics, inference
+latency, throughput, and CUDA peak memory fields.
 
 ## Prediction
 
