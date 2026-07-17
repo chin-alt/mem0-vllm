@@ -3,13 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+from tqdm.auto import tqdm
+
 from data import load_examples, read_json_records, write_jsonl
 from evaluate_business import get_torch_cuda_memory_mib, cleanup_cuda_memory
-from evaluate_business_crossencoder import load_cross_encoder, predict_cross_encoder
+from evaluate_business_crossencoder import filter_kwargs, flatten_scores, load_cross_encoder, predict_cross_encoder, sigmoid
 from evaluate_jsonl_vllm import (
     PASSTHROUGH_METADATA_FIELDS,
     choose_instruction,
@@ -51,7 +55,68 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local_files_only", action="store_true")
     parser.add_argument("--save_doc_text", action="store_true", default=True)
     parser.add_argument("--no_save_doc_text", dest="save_doc_text", action="store_false")
+    parser.add_argument(
+        "--progress_file",
+        default=None,
+        help="Optional JSONL progress file for data-parallel parent processes.",
+    )
     return parser.parse_args()
+
+
+def write_progress(progress_file: str | None, completed: int, total: int) -> None:
+    if not progress_file:
+        return
+    path = Path(progress_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"completed": completed, "total": total}, ensure_ascii=False) + "\n")
+
+
+def predict_cross_encoder_with_progress(
+    model: Any,
+    pairs: list[tuple[str, str]],
+    batch_size: int,
+    score_activation: str,
+    progress_file: str | None,
+) -> list[float]:
+    if not progress_file:
+        return predict_cross_encoder(
+            model,
+            pairs,
+            batch_size=batch_size,
+            score_activation=score_activation,
+        )
+
+    total = len(pairs)
+    write_progress(progress_file, completed=0, total=total)
+    scores: list[float] = []
+    num_batches = math.ceil(total / max(1, batch_size))
+    for start in tqdm(
+        range(0, total, batch_size),
+        total=num_batches,
+        desc="CrossEncoder scoring",
+        unit="batch",
+        dynamic_ncols=True,
+        ascii=True,
+    ):
+        batch_pairs = pairs[start : start + batch_size]
+        predict_kwargs: dict[str, Any] = {
+            "batch_size": batch_size,
+            "show_progress_bar": False,
+        }
+        if score_activation in {"sigmoid", "identity"} and torch is not None:
+            predict_kwargs["activation_fn"] = torch.nn.Identity()
+        filtered_kwargs = filter_kwargs(model.predict, predict_kwargs)
+        raw_scores = flatten_scores(model.predict(batch_pairs, **filtered_kwargs))
+        if score_activation == "sigmoid" and "activation_fn" in filtered_kwargs:
+            raw_scores = sigmoid(raw_scores)
+        if not np.all(np.isfinite(raw_scores)):
+            bad_count = int((~np.isfinite(raw_scores)).sum())
+            logger.warning("CrossEncoder scores contain %d NaN/inf values; replacing with 0.0.", bad_count)
+            raw_scores = np.nan_to_num(raw_scores, nan=0.0, posinf=1.0, neginf=0.0)
+        scores.extend(float(score) for score in raw_scores.tolist())
+        write_progress(progress_file, completed=len(scores), total=total)
+    return scores
 
 
 def main() -> None:
@@ -77,11 +142,12 @@ def main() -> None:
         args.batch_size,
     )
     start_time = time.perf_counter()
-    scores = predict_cross_encoder(
+    scores = predict_cross_encoder_with_progress(
         model,
         pairs,
         batch_size=args.batch_size,
         score_activation=args.score_activation,
+        progress_file=args.progress_file,
     )
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(scores))

@@ -1351,6 +1351,38 @@ bash scripts/eval_cmteb_r_crossencoder.sh
 `SCORE_ACTIVATION=sigmoid` matches pointwise BCE soft-label training. Use
 `identity` only if you intentionally want raw CrossEncoder logits.
 
+For four-card or eight-card data-parallel CrossEncoder evaluation, run one
+full model copy per GPU and split the JSONL by query group:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+DEVICES=0,1,2,3 \
+NUM_SHARDS=4 \
+TEST_FILE=data/cmteb_r/cmteb_r_qwen3_embedding_candidates.jsonl \
+MODEL_PATH=/path/to/modernbert_or_mbert_checkpoint \
+OUTPUT_DIR=outputs/cmteb_r_crossencoder_dp_modernbert \
+MAX_LENGTH=8192 \
+BATCH_SIZE=32 \
+PRECISION=bf16 \
+SCORE_ACTIVATION=sigmoid \
+EXPECTED_FBETA_BETAS="0.2 0.3 0.5 0.7 1.0" \
+bash scripts/eval_cmteb_r_crossencoder_dp.sh
+```
+
+For eight cards, use `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`,
+`DEVICES=0,1,2,3,4,5,6,7`, and `NUM_SHARDS=8`. This is data parallel:
+each GPU loads one model and scores a different subset of queries. It does
+not split one model across GPUs, so lower `BATCH_SIZE` first if a single
+ModernBERT/mBERT copy does not fit.
+
+The CMTEB-R candidate JSONL has positives if it was built with qrels, for
+example through `build_cmteb_r_candidates.py` with `QRELS_INPUT_DIR` set.
+Positive qrels documents are written with positive labels, negative candidates
+with negative labels, and the evaluator treats `label >= 0.7` as relevant by
+default. The reranker still only sorts the first-stage candidate list; if the
+Qwen3-Embedding top-k candidate list misses all qrels positives for a query,
+`CandidateRecall`/`candidate_relevant_count` will expose that retrieval miss.
+
 ## LoCoMo Reranker Evaluation
 
 LoCoMo `locomo10.json` is a long-term conversation QA benchmark. For reranker
