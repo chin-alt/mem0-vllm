@@ -1446,6 +1446,11 @@ MAX_QUERIES=20              debug first 20 QA groups
 INCLUDE_ANSWER_METADATA=1   keep answer fields as metadata only, never as model input
 ```
 
+For pure reranker quality, build an oracle-style candidate file with
+`ENSURE_POSITIVES=1`; otherwise LoCoMo metrics include first-stage retrieval
+misses from Qwen3-Embedding/BM25. If `CandidateRecall` is low, NDCG/MRR are
+capped even when the reranker itself is working.
+
 After evaluation, analyze LoCoMo by query/category and export bad cases:
 
 ```bash
@@ -1507,12 +1512,21 @@ LoCoMo analysis folder:
 ```text
 outputs/locomo_crossencoder_<timestamp>/locomo__modernbert/overall_metrics.json
 outputs/locomo_crossencoder_<timestamp>/locomo__modernbert/predictions.jsonl
+outputs/locomo_crossencoder_<timestamp>/locomo__modernbert/locomo_diagnostics.json
 outputs/locomo_crossencoder_<timestamp>/locomo__modernbert/locomo_analysis/
 outputs/locomo_crossencoder_<timestamp>/summary_metrics.xlsx
 ```
 
 The summary table includes ranking metrics, dynamic beta metrics, inference
 latency, throughput, and CUDA peak memory fields.
+
+If LoCoMo `NDCG@10` is unexpectedly low, first open
+`locomo_diagnostics.json`. The most important fields are
+`candidate_summary.candidate_recall`,
+`candidate_summary.groups_without_candidate_positive`,
+`prediction_summary.model_NDCG@10`,
+`prediction_summary.inverted_NDCG@10`, and
+`prediction_summary.positive_minus_negative_score_mean`.
 
 ## Prediction
 

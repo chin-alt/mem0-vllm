@@ -132,7 +132,18 @@ def record_to_doc(record: dict[str, Any]) -> str:
 
 
 def _coerce_label(record: dict[str, Any], require_label: bool) -> tuple[float, float] | None:
-    raw = record.get("labels", record.get("label", record.get("score")))
+    label_source = "labels"
+    if "labels" in record:
+        raw = record.get("labels")
+    elif "raw_label" in record:
+        label_source = "raw_label"
+        raw = record.get("raw_label")
+    elif "label" in record:
+        label_source = "label"
+        raw = record.get("label")
+    else:
+        label_source = "score"
+        raw = record.get("score")
     if raw is None:
         if require_label:
             return None
@@ -143,7 +154,11 @@ def _coerce_label(record: dict[str, Any], require_label: bool) -> tuple[float, f
         if require_label:
             return None
         raw_label = 0.0
-    label = max(0.0, min(1.0, raw_label / 10.0))
+    if label_source == "label" and 0.0 <= raw_label <= 1.0:
+        label = raw_label
+        raw_label = label * 10.0
+    else:
+        label = max(0.0, min(1.0, raw_label / 10.0))
     return raw_label, label
 
 

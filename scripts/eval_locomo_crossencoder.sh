@@ -152,6 +152,13 @@ run_one() {
       --bad_rank_threshold "${BAD_RANK_THRESHOLD}" \
       --doc_snippet_chars "${DOC_SNIPPET_CHARS}" \
       "${analysis_extra_args[@]}"
+
+    "${PYTHON_BIN}" src/diagnose_locomo_eval.py \
+      --eval_dir "${run_dir}" \
+      --test_file "${TEST_FILE}" \
+      --output_file "${run_dir}/locomo_diagnostics.json" \
+      --relevance_threshold "${RELEVANCE_THRESHOLD}" \
+      --ndcg_k "${BAD_NDCG_K}"
   fi
 
   [[ "${POST_RUN_SLEEP}" != "0" ]] && sleep "${POST_RUN_SLEEP}"
