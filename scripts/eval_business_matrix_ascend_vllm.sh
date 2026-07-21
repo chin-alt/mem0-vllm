@@ -17,7 +17,7 @@ Environment overrides:
   BATCH_SIZE                     vLLM LLM.score chunk size. Default: 64
   SCORING_BACKEND                pooling or generate. Default: pooling
   EXPECTED_FBETA_BETA            Beta for dynamic Expected-Fbeta cutoff. Default: 0.3
-  DTYPE                          auto, bfloat16, float16, or float32. Default: bfloat16
+  DTYPE                          auto, bfloat16, float16, or float32. Default: float16
   GPU_MEMORY_UTILIZATION         vLLM memory utilization knob. Default: 0.85
   TENSOR_PARALLEL_SIZE           vLLM tensor parallel size. Default: 1
   MAX_NUM_BATCHED_TOKENS         vLLM max_num_batched_tokens. Default: 8192
@@ -34,8 +34,8 @@ Environment overrides:
 
 Notes:
   Source the CANN/NNAL environment before running this script, or run inside the
-  official vllm-ascend container. If building vllm-ascend away from an NPU host,
-  set SOC_VERSION=ascend910b4 before installation.
+  official vllm-ascend container. Prefer building vllm-ascend on the NPU host so
+  npu-smi can detect the SoC automatically.
 EOF
 }
 
@@ -60,7 +60,7 @@ MAX_LENGTH="${MAX_LENGTH:-2048}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 SCORING_BACKEND="${SCORING_BACKEND:-pooling}"
 EXPECTED_FBETA_BETA="${EXPECTED_FBETA_BETA:-0.3}"
-DTYPE="${DTYPE:-bfloat16}"
+DTYPE="${DTYPE:-float16}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
