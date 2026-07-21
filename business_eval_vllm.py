@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import importlib.metadata
+import importlib.util
 import json
 import logging
 import math
@@ -136,10 +138,34 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "bfloat16", "float16", "float32"],
         default="bfloat16",
     )
+    parser.add_argument(
+        "--device_backend",
+        choices=["auto", "cuda", "ascend"],
+        default=os.environ.get("VLLM_DEVICE_BACKEND", "auto"),
+        help=(
+            "Inference backend hint. Use ascend on Huawei Ascend/vllm-ascend "
+            "machines; auto selects ascend when vllm_ascend is installed."
+        ),
+    )
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.90)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     parser.add_argument("--max_num_batched_tokens", type=int, default=32768)
     parser.add_argument("--max_num_seqs", type=int, default=256)
+    parser.add_argument(
+        "--additional_config",
+        default=os.environ.get("VLLM_ADDITIONAL_CONFIG", ""),
+        help="Optional JSON object passed to vLLM LLM(..., additional_config=...).",
+    )
+    parser.add_argument(
+        "--distributed_executor_backend",
+        default=os.environ.get("VLLM_DISTRIBUTED_EXECUTOR_BACKEND", ""),
+        help="Optional vLLM distributed executor backend, for example mp or ray.",
+    )
+    parser.add_argument(
+        "--quantization",
+        default=os.environ.get("VLLM_QUANTIZATION", ""),
+        help="Optional vLLM quantization name, for example ascend for W8A8 Ascend weights.",
+    )
     parser.add_argument("--enable_prefix_caching", action="store_true", default=True)
     parser.add_argument("--no_enable_prefix_caching", dest="enable_prefix_caching", action="store_false")
     parser.add_argument("--sort_by_length", action="store_true", default=True)
@@ -156,6 +182,99 @@ def parse_args() -> argparse.Namespace:
         help="Include full document text in predictions.jsonl for debugging.",
     )
     return parser.parse_args()
+
+
+def package_version(package_name: str) -> str:
+    try:
+        return importlib.metadata.version(package_name)
+    except importlib.metadata.PackageNotFoundError:
+        return ""
+
+
+def resolve_device_backend(requested_backend: str) -> str:
+    if requested_backend != "auto":
+        return requested_backend
+    if importlib.util.find_spec("vllm_ascend") is not None:
+        return "ascend"
+    return "cuda"
+
+
+def prepare_vllm_platform(device_backend: str) -> str:
+    resolved_backend = resolve_device_backend(device_backend)
+    if resolved_backend == "ascend":
+        try:
+            import vllm_ascend  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "--device_backend ascend requires vllm-ascend. "
+                "Install the Ascend environment with requirements-ascend-vllm.txt "
+                "or run inside the official vllm-ascend image."
+            ) from exc
+        if not os.environ.get("ASCEND_RT_VISIBLE_DEVICES"):
+            logger.warning(
+                "ASCEND_RT_VISIBLE_DEVICES is not set; vLLM Ascend will use the runtime-visible NPUs."
+            )
+    return resolved_backend
+
+
+def parse_json_object(text: str, option_name: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{option_name} must be valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{option_name} must be a JSON object.")
+    return value
+
+
+def validate_vllm_python_stack(
+    device_backend: str,
+    vllm_version: str,
+    transformers_version: str,
+    tokenizers_version: str,
+) -> None:
+    if device_backend == "ascend":
+        logger.info(
+            "Using vLLM Ascend stack: vllm=%s vllm-ascend=%s transformers=%s tokenizers=%s",
+            vllm_version,
+            package_version("vllm-ascend") or package_version("vllm_ascend") or "unknown",
+            transformers_version,
+            tokenizers_version,
+        )
+        return
+
+    if Version(vllm_version) != Version("0.10.2"):
+        logger.warning(
+            "The CUDA vLLM evaluator was validated with vllm==0.10.2; current vllm=%s. "
+            "Continuing with feature-based kwarg filtering.",
+            vllm_version,
+        )
+        return
+
+    if Version(transformers_version) < Version(MIN_TRANSFORMERS_FOR_VLLM_0102):
+        raise RuntimeError(
+            f"transformers=={transformers_version} is too old for vllm==0.10.2. "
+            f"Please upgrade to transformers>={MIN_TRANSFORMERS_FOR_VLLM_0102}. "
+            "The Qwen2Tokenizer all_special_tokens_extended error is caused by this mismatch."
+        )
+    if Version(transformers_version) >= Version(MAX_TRANSFORMERS_FOR_VLLM_0102):
+        raise RuntimeError(
+            f"transformers=={transformers_version} is too new for vllm==0.10.2. "
+            "Please use transformers>=4.55.2,<5.0.0 in the dedicated vLLM eval environment. "
+            "The Qwen2Tokenizer all_special_tokens_extended error is caused by this mismatch."
+        )
+    if Version(tokenizers_version) < Version(MIN_TOKENIZERS_FOR_VLLM_0102):
+        raise RuntimeError(
+            f"tokenizers=={tokenizers_version} is too old for vllm==0.10.2. "
+            f"Please upgrade to tokenizers>={MIN_TOKENIZERS_FOR_VLLM_0102}."
+        )
+    if Version(tokenizers_version) >= Version(MAX_TOKENIZERS_FOR_VLLM_0102):
+        raise RuntimeError(
+            f"tokenizers=={tokenizers_version} is too new for vllm==0.10.2. "
+            "Please use tokenizers>=0.21.1,<0.22.0 in the dedicated vLLM eval environment."
+        )
 
 
 def filter_supported_kwargs(
@@ -272,6 +391,8 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_DATASETS_OFFLINE"] = "1"
+    device_backend = prepare_vllm_platform(getattr(args, "device_backend", "auto"))
+    setattr(args, "device_backend", device_backend)
     try:
         import tokenizers
         import transformers
@@ -282,30 +403,15 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
             "business_eval_vllm.py requires vLLM. Install it on the Linux GPU "
             "machine with: pip install -r requirements-vllm.txt"
         ) from exc
-    if Version(transformers.__version__) < Version(MIN_TRANSFORMERS_FOR_VLLM_0102):
-        raise RuntimeError(
-            f"transformers=={transformers.__version__} is too old for vllm==0.10.2. "
-            f"Please upgrade to transformers>={MIN_TRANSFORMERS_FOR_VLLM_0102}. "
-            "The Qwen2Tokenizer all_special_tokens_extended error is caused by this mismatch."
-        )
-    if Version(transformers.__version__) >= Version(MAX_TRANSFORMERS_FOR_VLLM_0102):
-        raise RuntimeError(
-            f"transformers=={transformers.__version__} is too new for vllm==0.10.2. "
-            "Please use transformers>=4.55.2,<5.0.0 in the dedicated vLLM eval environment. "
-            "The Qwen2Tokenizer all_special_tokens_extended error is caused by this mismatch."
-        )
-    if Version(tokenizers.__version__) < Version(MIN_TOKENIZERS_FOR_VLLM_0102):
-        raise RuntimeError(
-            f"tokenizers=={tokenizers.__version__} is too old for vllm==0.10.2. "
-            f"Please upgrade to tokenizers>={MIN_TOKENIZERS_FOR_VLLM_0102}."
-        )
-    if Version(tokenizers.__version__) >= Version(MAX_TOKENIZERS_FOR_VLLM_0102):
-        raise RuntimeError(
-            f"tokenizers=={tokenizers.__version__} is too new for vllm==0.10.2. "
-            "Please use tokenizers>=0.21.1,<0.22.0 in the dedicated vLLM eval environment."
-        )
+    validate_vllm_python_stack(
+        device_backend=device_backend,
+        vllm_version=getattr(vllm, "__version__", "0"),
+        transformers_version=transformers.__version__,
+        tokenizers_version=tokenizers.__version__,
+    )
     validate_vllm_model_path(args.model_path, require_local=getattr(args, "local_files_only", False))
     tokenizer_path = prepare_vllm_tokenizer_path(args.model_path, args.output_dir)
+    additional_config = parse_json_object(getattr(args, "additional_config", ""), "--additional_config")
 
     scoring_backend = getattr(args, "scoring_backend", "pooling")
     llm_kwargs: dict[str, Any] = {
@@ -318,6 +424,12 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
         "max_num_seqs": args.max_num_seqs,
         "enable_prefix_caching": args.enable_prefix_caching,
     }
+    if additional_config is not None:
+        llm_kwargs["additional_config"] = additional_config
+    if getattr(args, "distributed_executor_backend", ""):
+        llm_kwargs["distributed_executor_backend"] = args.distributed_executor_backend
+    if getattr(args, "quantization", ""):
+        llm_kwargs["quantization"] = args.quantization
     if scoring_backend == "pooling":
         llm_kwargs["runner"] = "pooling"
         llm_kwargs["hf_overrides"] = QWEN3_RERANKER_HF_OVERRIDES
@@ -337,8 +449,10 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
     logger.info("Initializing vLLM with kwargs: %s", json.dumps(_jsonable(filtered_kwargs), ensure_ascii=False))
     llm = LLM(**filtered_kwargs)
     setattr(llm, "_memranker_vllm_version", getattr(vllm, "__version__", "unknown"))
+    setattr(llm, "_memranker_vllm_ascend_version", package_version("vllm-ascend") or "")
     setattr(llm, "_memranker_vllm_tokenizer_path", tokenizer_path or "")
     setattr(llm, "_memranker_scoring_backend", scoring_backend)
+    setattr(llm, "_memranker_device_backend", device_backend)
     return llm
 
 
@@ -635,15 +749,20 @@ def main() -> None:
     metrics.update(
         {
             "backend": "vllm",
+            "device_backend": args.device_backend,
             "vllm_runner": "pooling" if args.scoring_backend == "pooling" else "generate",
             "scoring_backend": args.scoring_backend,
             "vllm_version": getattr(llm, "_memranker_vllm_version", "unknown"),
+            "vllm_ascend_version": getattr(llm, "_memranker_vllm_ascend_version", ""),
             "vllm_tokenizer_path": getattr(llm, "_memranker_vllm_tokenizer_path", ""),
             "dtype": args.dtype,
             "gpu_memory_utilization": args.gpu_memory_utilization,
             "tensor_parallel_size": args.tensor_parallel_size,
             "max_num_batched_tokens": args.max_num_batched_tokens,
             "max_num_seqs": args.max_num_seqs,
+            "additional_config": args.additional_config,
+            "distributed_executor_backend": args.distributed_executor_backend,
+            "quantization": args.quantization,
             "sort_by_length": args.sort_by_length,
             "sort_descending": args.sort_descending,
             "local_files_only": args.local_files_only,

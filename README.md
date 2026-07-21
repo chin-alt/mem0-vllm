@@ -1018,6 +1018,77 @@ QWEN3_RERANKER_06B_LORA_PATH=/path/to/qwen3_06b_lora_merged \
 bash scripts/eval_business_matrix_vllm.sh
 ```
 
+### Ascend 910B4 vLLM Business Evaluation
+
+For Huawei Ascend 910B4 / Atlas A2 inference, use the vLLM Ascend path instead
+of the CUDA vLLM environment. The business matrix logic stays the same:
+ground-truth parsing, recall parsing, Qwen3-Reranker prompt formatting,
+`LLM.score`, `predictions.jsonl`, `business_eval.{csv,xlsx}`, and
+`summary_metrics.{csv,json,xlsx}` are shared with the CUDA vLLM evaluator.
+
+Prepare the Ascend runtime on the target machine. The recommended path is the
+official `vllm-ascend` image. For a manual environment, source CANN and NNAL
+before installing the Python stack:
+
+```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+pip install -r requirements-ascend-vllm.txt
+```
+
+If building `vllm-ascend` from source on a CPU-only build host, set the chip
+target before installation. Prefer building on the target 910B4 host when
+possible so `npu-smi` can detect the SoC automatically; otherwise use the
+SoC name supported by your `vllm-ascend` branch and CANN package:
+
+```bash
+export SOC_VERSION=ascend910b1  # Atlas A2 example from vLLM-Ascend docs
+```
+
+Run the 5-model x 3-dataset matrix on visible NPU chips:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1 \
+DATA_ROOT=/path/to/data/latency_delay \
+MODEL_ROOT=/path/to/models \
+OUTPUTS_ROOT=/path/to/outputs \
+MAX_LENGTH=2048 \
+BATCH_SIZE=64 \
+DTYPE=bfloat16 \
+TENSOR_PARALLEL_SIZE=2 \
+MAX_NUM_BATCHED_TOKENS=8192 \
+MAX_NUM_SEQS=64 \
+bash scripts/eval_business_matrix_ascend_vllm.sh
+```
+
+The Ascend script defaults to local/offline model loading and `pooling`
+scoring, using the same Qwen3-Reranker `hf_overrides` as the vLLM Ascend
+Qwen3-Reranker guide:
+
+```text
+architectures=["Qwen3ForSequenceClassification"]
+classifier_from_token=["no", "yes"]
+is_original_qwen3_reranker=true
+```
+
+For W8A8 Ascend-converted weights, pass the vLLM quantization name:
+
+```bash
+VLLM_QUANTIZATION=ascend bash scripts/eval_business_matrix_ascend_vllm.sh
+```
+
+For extra vLLM Ascend tuning, pass JSON through `VLLM_ADDITIONAL_CONFIG`:
+
+```bash
+VLLM_ADDITIONAL_CONFIG='{"enable_flashcomm1": true}' \
+bash scripts/eval_business_matrix_ascend_vllm.sh
+```
+
+Do not use `CUDA_VISIBLE_DEVICES`, `flash_attention_2`, or `bitsandbytes` for
+the Ascend run. If you need the slower Transformers fallback for debugging,
+install `torch-npu`, set `ASCEND_RT_VISIBLE_DEVICES`, and run
+`src/evaluate_business.py` with `ATTN_IMPLEMENTATION=sdpa` or `eager`.
+
 ## C-MTEB Retrieval Generalization
 
 C-MTEB Retrieval is a group of Hugging Face datasets rather than one local

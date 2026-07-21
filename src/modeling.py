@@ -41,6 +41,28 @@ except Exception:  # pragma: no cover - lets mock mode work without torch.
     torch = None  # type: ignore[assignment]
 
 
+def torch_npu_is_available() -> bool:
+    if torch is None:
+        return False
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        return True
+    try:
+        import torch_npu  # noqa: F401
+    except Exception:
+        return False
+    return bool(hasattr(torch, "npu") and torch.npu.is_available())
+
+
+def default_inference_device() -> str:
+    if torch is None:
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch_npu_is_available():
+        return "npu"
+    return "cpu"
+
+
 def normalize_model_name_or_path(model_name_or_path: str) -> str:
     """Correct common Qwen3 reranker Hub ID typos without touching local paths."""
     normalized = model_name_or_path.strip()
@@ -80,7 +102,9 @@ def model_load_help(model_name_or_path: str, exc: BaseException) -> str:
         "--model_name_or_path.\n"
         "5. If flash-attn is unavailable, rerun with --attn_implementation eager "
         "or set ATTN_IMPLEMENTATION=eager in the helper scripts.\n"
-        "6. If your cluster uses a proxy or mirror, fix HTTPS_PROXY/HTTP_PROXY or set "
+        "6. On Ascend NPU, source the CANN environment, install torch-npu, and use "
+        "--attn_implementation sdpa or eager instead of flash_attention_2.\n"
+        "7. If your cluster uses a proxy or mirror, fix HTTPS_PROXY/HTTP_PROXY or set "
         "HF_ENDPOINT before running."
     )
 
@@ -305,7 +329,7 @@ class CausalLMScorer:
 
             model = PeftModel.from_pretrained(model, model_name_or_path)
 
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or default_inference_device()
         self.wrapper = QwenCausalReranker(model, tokenizer)
         self.wrapper.eval()
         self.wrapper.to(self.device)
@@ -333,7 +357,7 @@ def predict_causal_model(
 ) -> list[float]:
     if torch is None:
         raise RuntimeError("torch is required for causal prediction")
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = device or default_inference_device()
     wrapper.eval()
     scores: list[float] = []
     starts = range(0, len(input_texts), batch_size)

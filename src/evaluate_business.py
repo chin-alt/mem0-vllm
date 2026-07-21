@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 
 from data import format_input_text, record_to_doc, write_jsonl
-from modeling import DEFAULT_MODEL_NAME, load_scorer, torch
+from modeling import DEFAULT_MODEL_NAME, load_scorer, torch, torch_npu_is_available
 
 
 logger = logging.getLogger(__name__)
@@ -520,25 +520,90 @@ def bytes_to_mib(value: int | float) -> float:
     return float(value) / (1024.0**2)
 
 
-def get_torch_cuda_memory_mib() -> dict[str, Any]:
-    if torch is None or not torch.cuda.is_available():
+def get_torch_accelerator_memory_mib() -> dict[str, Any]:
+    empty = {
+        "accelerator": "none",
+        "accelerator_peak_allocated_mib": 0.0,
+        "accelerator_peak_reserved_mib": 0.0,
+        "cuda_peak_allocated_mib": 0.0,
+        "cuda_peak_reserved_mib": 0.0,
+        "npu_peak_allocated_mib": 0.0,
+        "npu_peak_reserved_mib": 0.0,
+    }
+    if torch is None:
+        return empty
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        device_index = torch.cuda.current_device()
+        allocated = bytes_to_mib(torch.cuda.max_memory_allocated(device_index))
+        reserved = bytes_to_mib(torch.cuda.max_memory_reserved(device_index))
         return {
-            "cuda_peak_allocated_mib": 0.0,
-            "cuda_peak_reserved_mib": 0.0,
+            **empty,
+            "accelerator": "cuda",
+            "accelerator_peak_allocated_mib": allocated,
+            "accelerator_peak_reserved_mib": reserved,
+            "cuda_peak_allocated_mib": allocated,
+            "cuda_peak_reserved_mib": reserved,
         }
-    torch.cuda.synchronize()
-    device_index = torch.cuda.current_device()
+
+    if torch_npu_is_available():
+        torch.npu.synchronize()
+        device_index = torch.npu.current_device()
+        max_memory_allocated = getattr(torch.npu, "max_memory_allocated", None)
+        max_memory_reserved = getattr(torch.npu, "max_memory_reserved", None)
+        allocated = bytes_to_mib(max_memory_allocated(device_index)) if max_memory_allocated else 0.0
+        reserved = bytes_to_mib(max_memory_reserved(device_index)) if max_memory_reserved else 0.0
+        return {
+            **empty,
+            "accelerator": "npu",
+            "accelerator_peak_allocated_mib": allocated,
+            "accelerator_peak_reserved_mib": reserved,
+            "npu_peak_allocated_mib": allocated,
+            "npu_peak_reserved_mib": reserved,
+        }
+
+    return empty
+
+
+def reset_torch_accelerator_memory_stats() -> None:
+    if torch is None:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+    elif torch_npu_is_available():
+        empty_cache = getattr(torch.npu, "empty_cache", None)
+        if empty_cache is not None:
+            empty_cache()
+        reset_peak_memory_stats = getattr(torch.npu, "reset_peak_memory_stats", None)
+        if reset_peak_memory_stats is not None:
+            reset_peak_memory_stats()
+
+
+def cleanup_accelerator_memory() -> None:
+    gc.collect()
+    if torch is None:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+    elif torch_npu_is_available():
+        empty_cache = getattr(torch.npu, "empty_cache", None)
+        if empty_cache is not None:
+            empty_cache()
+
+
+def get_torch_cuda_memory_mib() -> dict[str, Any]:
+    memory = get_torch_accelerator_memory_mib()
     return {
-        "cuda_peak_allocated_mib": bytes_to_mib(torch.cuda.max_memory_allocated(device_index)),
-        "cuda_peak_reserved_mib": bytes_to_mib(torch.cuda.max_memory_reserved(device_index)),
+        "cuda_peak_allocated_mib": memory["cuda_peak_allocated_mib"],
+        "cuda_peak_reserved_mib": memory["cuda_peak_reserved_mib"],
     }
 
 
 def cleanup_cuda_memory() -> None:
-    gc.collect()
-    if torch is not None and torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+    cleanup_accelerator_memory()
 
 
 def main() -> None:
@@ -568,9 +633,7 @@ def main() -> None:
     if not input_texts:
         raise ValueError("No query-document pairs to score after matching recall data to ground truth.")
 
-    if torch is not None and torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+    reset_torch_accelerator_memory_stats()
 
     scorer = load_scorer(
         args.model_path,
@@ -590,7 +653,7 @@ def main() -> None:
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(input_texts))
     examples_per_sec = len(input_texts) / score_time if score_time > 0 else 0.0
-    cuda_peak_memory = get_torch_cuda_memory_mib()
+    accelerator_peak_memory = get_torch_accelerator_memory_mib()
 
     ranked_predictions = attach_scores_and_ranks(
         mapping,
@@ -621,8 +684,13 @@ def main() -> None:
             "seconds_per_example": float(sec_per_example),
             "examples_per_second": float(examples_per_sec),
             "skipped_recall_queries_without_gt": skipped_queries,
-            "cuda_peak_allocated_mib": cuda_peak_memory["cuda_peak_allocated_mib"],
-            "cuda_peak_reserved_mib": cuda_peak_memory["cuda_peak_reserved_mib"],
+            "accelerator": accelerator_peak_memory["accelerator"],
+            "accelerator_peak_allocated_mib": accelerator_peak_memory["accelerator_peak_allocated_mib"],
+            "accelerator_peak_reserved_mib": accelerator_peak_memory["accelerator_peak_reserved_mib"],
+            "cuda_peak_allocated_mib": accelerator_peak_memory["cuda_peak_allocated_mib"],
+            "cuda_peak_reserved_mib": accelerator_peak_memory["cuda_peak_reserved_mib"],
+            "npu_peak_allocated_mib": accelerator_peak_memory["npu_peak_allocated_mib"],
+            "npu_peak_reserved_mib": accelerator_peak_memory["npu_peak_reserved_mib"],
         }
     )
 
