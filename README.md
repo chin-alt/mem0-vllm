@@ -1020,11 +1020,61 @@ bash scripts/eval_business_matrix_vllm.sh
 
 ### Ascend 910B4 vLLM Business Evaluation
 
-For Huawei Ascend 910B4 / Atlas A2 inference, use the vLLM Ascend path instead
-of the CUDA vLLM environment. The business matrix logic stays the same:
-ground-truth parsing, recall parsing, Qwen3-Reranker prompt formatting,
-`LLM.score`, `predictions.jsonl`, `business_eval.{csv,xlsx}`, and
-`summary_metrics.{csv,json,xlsx}` are shared with the CUDA vLLM evaluator.
+For Huawei Ascend 910B4 / Atlas A2 inference, there are two local inference
+paths. Use local vLLM-Ascend first when the dependency stack can be installed;
+use plain `torch-npu + transformers` as the fallback when vLLM-Ascend is blocked
+by the cloud image or Python package mirror. Both paths run on the 910B4 host
+itself. They do not use an HTTP service, remote API, or external inference
+provider. The business matrix logic stays the same: ground-truth parsing,
+recall parsing, Qwen3-Reranker prompt formatting, `predictions.jsonl`,
+`business_eval.{csv,xlsx}`, and `summary_metrics.{csv,json,xlsx}` are shared
+across the evaluators.
+
+The unified local entrypoint defaults to vLLM-Ascend:
+
+```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+pip install -r requirements-ascend-vllm.txt \
+  -i https://mirrors.huaweicloud.com/repository/pypi/simple
+
+ASCEND_RT_VISIBLE_DEVICES=0 \
+DATA_ROOT=/path/to/data/latency_delay \
+MODEL_ROOT=/path/to/models \
+OUTPUTS_ROOT=/path/to/outputs \
+BACKEND=vllm \
+DTYPE=float16 \
+BATCH_SIZE=32 \
+MAX_LENGTH=2048 \
+bash scripts/eval_business_matrix_ascend_local.sh
+```
+
+If vLLM-Ascend still cannot be installed, switch only the backend and
+requirements. This fallback runs the Qwen3-Reranker CausalLM prompt locally on
+NPU and reads the final yes/no logits, matching the official Transformers
+reranker practice:
+
+```bash
+pip install -r requirements-ascend-torch.txt \
+  -i https://mirrors.huaweicloud.com/repository/pypi/simple
+
+ASCEND_RT_VISIBLE_DEVICES=0 \
+DATA_ROOT=/path/to/data/latency_delay \
+MODEL_ROOT=/path/to/models \
+OUTPUTS_ROOT=/path/to/outputs \
+BACKEND=torch \
+DEVICE=npu \
+PRECISION=fp16 \
+ATTN_IMPLEMENTATION=eager \
+BATCH_SIZE=1 \
+MAX_LENGTH=2048 \
+bash scripts/eval_business_matrix_ascend_local.sh
+```
+
+For the torch fallback, start with `BATCH_SIZE=1` for 4B checkpoints. If a
+single pair scores successfully and memory is stable, increase it to `2` or
+`4`. Use `ATTN_IMPLEMENTATION=eager` as the safest first run on torch-npu; try
+`sdpa` only after the eager path is verified on your image.
 
 Prepare the Ascend runtime on the target machine. To stay as close as possible
 to the original CUDA environment, use the `0.10.2` vLLM line with the matching
@@ -1050,8 +1100,10 @@ the CUDA-only packages. The Ascend requirements file keeps the original
 versions where they are compatible, including
 `transformers==4.55.2`, `tokenizers==0.21.4`, `accelerate==1.14.0`,
 `peft==0.19.1`, `pandas==2.3.3`, `openpyxl==3.1.5`, and `tqdm==4.68.4`.
-On x86_64 hosts the requirements file installs the `+cpu` PyTorch wheels, while
-aarch64 hosts use the regular Linux wheels, matching the torch-npu guidance.
+The default `requirements-ascend-vllm.txt` targets aarch64 Ascend cloud hosts
+and avoids `download.pytorch.org`, because many NPU clouds only allow the
+Huawei Cloud PyPI mirrors. For x86_64 NPU hosts, use
+`requirements-ascend-vllm-x86_64.txt`.
 
 For a manual environment, source CANN and NNAL before installing the Python
 stack:
@@ -1063,7 +1115,23 @@ python -m venv .venv-ascend
 source .venv-ascend/bin/activate
 pip install --upgrade pip setuptools wheel
 pip install "numpy>=1.24.0,<2.0.0"
-pip install -r requirements-ascend-vllm.txt
+pip install -r requirements-ascend-vllm.txt \
+  -i https://mirrors.huaweicloud.com/repository/pypi/simple
+```
+
+If the cloud cannot reach even the Huawei mirrors, build a wheelhouse on a
+networked aarch64 Linux machine or a matching container, copy it to the NPU
+host, and install offline:
+
+```bash
+pip download -r requirements-ascend-vllm.txt \
+  -d wheelhouse \
+  -i https://mirrors.huaweicloud.com/repository/pypi/simple
+tar -czf wheelhouse-ascend-vllm-aarch64.tar.gz wheelhouse
+
+# On the restricted cloud host:
+tar -xzf wheelhouse-ascend-vllm-aarch64.tar.gz
+pip install --no-index --find-links wheelhouse -r requirements-ascend-vllm.txt
 ```
 
 If your cloud image only exposes `vllm-ascend==0.11.0` and not

@@ -481,6 +481,7 @@ def load_scorer(
     fp16: bool = False,
     mock: bool = False,
     attn_implementation: str | None = None,
+    device: str | None = None,
 ) -> Any:
     if mock:
         return MockRerankerScorer(query=batch_query)
@@ -492,6 +493,7 @@ def load_scorer(
         return CausalLMScorer(
             model_path,
             max_length=max_length,
+            device=device,
             torch_dtype=dtype,
             attn_implementation=attn_implementation,
         )

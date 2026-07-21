@@ -34,6 +34,8 @@ BASE_COLUMNS = [
     "max_num_batched_tokens",
     "max_num_seqs",
     "sort_by_length",
+    "device",
+    "accelerator",
 ]
 METRIC_COLUMNS = [
     "num_gt_queries",
@@ -71,6 +73,10 @@ METRIC_COLUMNS = [
     "examples_per_second",
     "cuda_peak_allocated_mib",
     "cuda_peak_reserved_mib",
+    "accelerator_peak_allocated_mib",
+    "accelerator_peak_reserved_mib",
+    "npu_peak_allocated_mib",
+    "npu_peak_reserved_mib",
     "skipped_recall_queries_without_gt",
     "summary_csv",
     "summary_xlsx",

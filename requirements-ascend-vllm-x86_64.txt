@@ -1,14 +1,13 @@
-# Ascend aarch64 stack that stays closest to the original CUDA env.
-# Runtime requirements:
-#   Python >=3.9,<3.12
-#   CANN 8.3.RC1 or matching cloud-provided CANN/driver for torch-npu 2.8.x
-#   vLLM 0.10.2 + vllm-ascend 0.10.2rc1
+# Ascend x86_64 stack. Use this only when the NPU host CPU architecture is x86_64.
+# The default requirements-ascend-vllm.txt targets aarch64 cloud hosts and avoids
+# download.pytorch.org because many Ascend clouds block external egress.
+--extra-index-url https://download.pytorch.org/whl/cpu
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
-torch==2.8.0
+torch==2.8.0+cpu
 torch-npu==2.8.0
-torchvision==0.23.0
-torchaudio==2.8.0
+torchvision==0.23.0+cpu
+torchaudio==2.8.0+cpu
 vllm==0.10.2
 vllm-ascend==0.10.2rc1
 

@@ -63,6 +63,11 @@ def parse_args() -> argparse.Namespace:
         help="Beta used to choose the dynamic cutoff from normalized score prefix sums.",
     )
     parser.add_argument("--attn_implementation", default=None)
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="Optional inference device override, for example npu, cuda, or cpu.",
+    )
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--mock", action="store_true", help="Use lexical mock scorer for smoke tests.")
@@ -642,6 +647,7 @@ def main() -> None:
         fp16=args.fp16,
         mock=args.mock,
         attn_implementation=args.attn_implementation,
+        device=args.device,
     )
 
     logger.info(
@@ -680,6 +686,7 @@ def main() -> None:
             "expected_fbeta_beta": args.expected_fbeta_beta,
             "precision": "bf16" if args.bf16 else "fp16" if args.fp16 else "fp32",
             "attn_implementation": args.attn_implementation or "",
+            "device": args.device or "",
             "score_time_seconds": float(score_time),
             "seconds_per_example": float(sec_per_example),
             "examples_per_second": float(examples_per_sec),
