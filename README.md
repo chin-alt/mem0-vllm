@@ -1040,13 +1040,23 @@ pip install -r requirements-ascend-vllm.txt \
 
 ASCEND_RT_VISIBLE_DEVICES=0 \
 DATA_ROOT=/path/to/data/latency_delay \
-MODEL_ROOT=/path/to/models \
+MODEL_ROOT=/path/to/Qwen3-Reranker-4B \
 OUTPUTS_ROOT=/path/to/outputs \
 BACKEND=vllm \
 DTYPE=float16 \
 BATCH_SIZE=32 \
 MAX_LENGTH=2048 \
 bash scripts/eval_business_matrix_ascend_local.sh
+```
+
+When `MODEL_ROOT` points directly to a Hugging Face model directory containing
+`config.json`, the Ascend vLLM script evaluates only that model. You can also
+be explicit:
+
+```bash
+MODEL_NAME=qwen3_reranker_4b \
+MODEL_PATH=/path/to/Qwen3-Reranker-4B \
+bash scripts/eval_business_matrix_ascend_vllm.sh
 ```
 
 If vLLM-Ascend still cannot be installed, switch only the backend and
@@ -1076,17 +1086,16 @@ single pair scores successfully and memory is stable, increase it to `2` or
 `4`. Use `ATTN_IMPLEMENTATION=eager` as the safest first run on torch-npu; try
 `sdpa` only after the eager path is verified on your image.
 
-Prepare the Ascend runtime on the target machine. To stay as close as possible
-to the original CUDA environment, use the `0.10.2` vLLM line with the matching
-Ascend plugin release candidate:
+Prepare the Ascend runtime on the target machine. The closest public vLLM-Ascend
+line that works with Huawei Cloud mirrors is `0.11.0rc1`:
 
 ```text
 Python       >=3.9,<3.12
 CANN/NNAL    8.3.RC1 or the matching cloud-provided 8.3 package
-torch        2.8.0
-torch-npu    2.8.0
-vLLM         0.10.2
-vllm-ascend  0.10.2rc1
+torch        2.7.1
+torch-npu    2.7.1
+vLLM         0.11.0
+vllm-ascend  0.11.0rc1
 numpy        <2.0.0
 transformers 4.55.2
 tokenizers   0.21.4
@@ -1094,12 +1103,15 @@ tokenizers   0.21.4
 
 The original CUDA environment has `torch==2.8.0`, `vllm==0.10.2`,
 `numpy==2.2.6`, `xformers`, `triton`, and many `nvidia-*` packages. Do not
-reuse that full lockfile on Ascend; keep the business/data packages, keep
-`torch==2.8.0` and `vllm==0.10.2`, add `torch-npu`/`vllm-ascend`, and remove
-the CUDA-only packages. The Ascend requirements file keeps the original
-versions where they are compatible, including
+reuse that full lockfile on Ascend; keep the business/data packages, add
+`torch-npu`/`vllm-ascend`, and remove the CUDA-only packages. The Ascend
+requirements file keeps the original versions where they are compatible,
+including
 `transformers==4.55.2`, `tokenizers==0.21.4`, `accelerate==1.14.0`,
 `peft==0.19.1`, `pandas==2.3.3`, `openpyxl==3.1.5`, and `tqdm==4.68.4`.
+Do not install `vllm-ascend==0.10.2rc1` from the public mirrors: that wheel
+requires the unpublished/dev package `torch-npu==2.7.1.dev20250724`, so pip
+cannot resolve it on restricted Huawei Cloud images.
 The default `requirements-ascend-vllm.txt` targets aarch64 Ascend cloud hosts
 and avoids `download.pytorch.org`, because many NPU clouds only allow the
 Huawei Cloud PyPI mirrors. For x86_64 NPU hosts, use
@@ -1115,9 +1127,14 @@ python -m venv .venv-ascend
 source .venv-ascend/bin/activate
 pip install --upgrade pip setuptools wheel
 pip install "numpy>=1.24.0,<2.0.0"
-pip install -r requirements-ascend-vllm.txt \
-  -i https://mirrors.huaweicloud.com/repository/pypi/simple
+bash scripts/install_ascend_vllm_910b4.sh
 ```
+
+Do not install `torch`, `torch-npu`, `vllm`, and `vllm-ascend` in one pip
+command. The public `vllm==0.11.0` wheel metadata depends on `torch==2.8.0`,
+while vLLM-Ascend `0.11.0rc1` runs with `torch/torch-npu==2.7.1`; the install
+script handles this by installing vLLM packages with `--no-deps` after the
+Ascend torch stack is present.
 
 If the cloud cannot reach even the Huawei mirrors, build a wheelhouse on a
 networked aarch64 Linux machine or a matching container, copy it to the NPU
@@ -1134,10 +1151,9 @@ tar -xzf wheelhouse-ascend-vllm-aarch64.tar.gz
 pip install --no-index --find-links wheelhouse -r requirements-ascend-vllm.txt
 ```
 
-If your cloud image only exposes `vllm-ascend==0.11.0` and not
-`0.10.2rc1`, use the 0.11.0 fallback: install `vLLM v0.11.0` from source with
-`VLLM_TARGET_DEVICE=empty pip install -v -e .`, then install
-`vllm-ascend==0.11.0`, `torch==2.7.1`, and `torch-npu==2.7.1.post1`.
+If your cloud image exposes `vllm-ascend==0.11.0` final but not `0.11.0rc1`,
+use `vllm==0.11.0` with `vllm-ascend==0.11.0`; keep
+`torch==2.7.1` and `torch-npu==2.7.1`.
 
 If building `vllm-ascend` from source on a CPU-only build host, set the chip
 target before installation. Prefer building on the target 910B4 host when

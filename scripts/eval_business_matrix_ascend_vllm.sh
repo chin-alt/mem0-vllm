@@ -9,8 +9,10 @@ Environment overrides:
   OUTPUT_ROOT                    Output root. Default: outputs/business_matrix_ascend_vllm_<timestamp>
   ASCEND_RT_VISIBLE_DEVICES      NPU chip ids for evaluation. Default: 0
   DATA_ROOT                      Dataset root. Default: data/latency_delay
-  MODEL_ROOT                     Model root. Default: models
+  MODEL_ROOT                     Model root, or a single full model dir with config.json. Default: models
   OUTPUTS_ROOT                   LoRA merge output root. Default: outputs
+  MODEL_NAME                     Optional single model name.
+  MODEL_PATH                     Optional single full model path. Defaults to MODEL_ROOT when MODEL_NAME is set.
   MODEL_NAMES                    Optional whitespace-separated model names.
   MODEL_PATHS                    Optional |-separated model paths matching MODEL_NAMES.
   MAX_LENGTH                     Max sequence length. Default: 2048
@@ -80,13 +82,26 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 QWEN3_RERANKER_4B_LORA_PATH="${QWEN3_RERANKER_4B_LORA_PATH:-${OUTPUTS_ROOT}/qwen3_reranker_4b_8x3090_lora_merged}"
 QWEN3_RERANKER_06B_LORA_PATH="${QWEN3_RERANKER_06B_LORA_PATH:-${OUTPUTS_ROOT}/qwen3_reranker_06b_lora_merged}"
 
-if [[ -n "${MODEL_NAMES:-}" || -n "${MODEL_PATHS:-}" ]]; then
+is_full_model_dir() {
+  local path="$1"
+  [[ -f "${path}/config.json" || -f "${path}/params.json" ]]
+}
+
+if [[ -n "${MODEL_NAME:-}" || -n "${MODEL_PATH:-}" ]]; then
+  single_model_path="${MODEL_PATH:-${MODEL_ROOT}}"
+  single_model_name="${MODEL_NAME:-$(basename "${single_model_path}")}"
+  MODEL_NAME_ARRAY=("${single_model_name}")
+  MODEL_PATH_ARRAY=("${single_model_path}")
+elif [[ -n "${MODEL_NAMES:-}" || -n "${MODEL_PATHS:-}" ]]; then
   if [[ -z "${MODEL_NAMES:-}" || -z "${MODEL_PATHS:-}" ]]; then
     echo "MODEL_NAMES and MODEL_PATHS must be set together." >&2
     exit 2
   fi
   read -r -a MODEL_NAME_ARRAY <<< "${MODEL_NAMES}"
   IFS='|' read -r -a MODEL_PATH_ARRAY <<< "${MODEL_PATHS}"
+elif is_full_model_dir "${MODEL_ROOT}"; then
+  MODEL_NAME_ARRAY=("$(basename "${MODEL_ROOT}")")
+  MODEL_PATH_ARRAY=("${MODEL_ROOT}")
 else
   MODEL_NAME_ARRAY=(
     "memreranker_4b"
@@ -297,6 +312,13 @@ for dataset_idx in "${!DATASET_NAMES[@]}"; do
     fi
   done
 done
+
+metrics_count="$(find "${OUTPUT_ROOT}" -mindepth 2 -maxdepth 2 -name metrics.json | wc -l | tr -d '[:space:]')"
+if [[ "${metrics_count}" == "0" ]]; then
+  echo "[error] no metrics.json files were produced under ${OUTPUT_ROOT}" >&2
+  echo "[error] check MODEL_ROOT/MODEL_PATH, DATA_ROOT, recall files, and ground-truth Excel files." >&2
+  exit 3
+fi
 
 "${PYTHON_BIN}" src/summarize_business_matrix.py \
   --output_root "${OUTPUT_ROOT}" \

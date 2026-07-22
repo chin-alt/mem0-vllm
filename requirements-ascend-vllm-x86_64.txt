@@ -1,15 +1,13 @@
-# Ascend x86_64 stack. Use this only when the NPU host CPU architecture is x86_64.
+# Ascend x86_64 vLLM stack. Use this only when the NPU host CPU architecture is x86_64.
 # The default requirements-ascend-vllm.txt targets aarch64 cloud hosts and avoids
 # download.pytorch.org because many Ascend clouds block external egress.
 --extra-index-url https://download.pytorch.org/whl/cpu
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
-torch==2.8.0+cpu
-torch-npu==2.8.0
-torchvision==0.23.0+cpu
-torchaudio==2.8.0+cpu
-vllm==0.10.2
-vllm-ascend==0.10.2rc1
+torch==2.7.1+cpu
+torch-npu==2.7.1
+torchvision==0.22.1+cpu
+torchaudio==2.7.1+cpu
 
 numpy>=1.24.0,<2.0.0
 transformers==4.55.2
