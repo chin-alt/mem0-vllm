@@ -1139,6 +1139,16 @@ packages whose newer releases dropped Python 3.9. The selected 3.9 versions
 still satisfy vLLM 0.11.0's minimum constraints and provide aarch64 wheels;
 Python 3.10+ retains the original newer pins.
 
+This stack pins `setuptools==80.9.0` because setuptools 82 removed the legacy
+`pkg_resources` module that some dependencies still import. To repair an
+existing environment without reinstalling the full stack, run:
+
+```bash
+python -m pip install --force-reinstall "setuptools==80.9.0" \
+  -i https://mirrors.huaweicloud.com/repository/pypi/simple
+python -c "import pkg_resources; print('pkg_resources ok')"
+```
+
 Do not install `torch`, `torch-npu`, `vllm`, and `vllm-ascend` in one pip
 command. The public `vllm==0.11.0` wheel metadata depends on `torch==2.8.0`,
 while vLLM-Ascend `0.11.0rc1` runs with `torch/torch-npu==2.7.1`; the install

@@ -47,7 +47,7 @@ fi
 
 echo "[env] installing with ${PYTHON_BIN} ($("${PYTHON_BIN}" --version 2>&1))"
 
-"${PYTHON_BIN}" -m pip install --upgrade "pip>=24" setuptools wheel \
+"${PYTHON_BIN}" -m pip install --upgrade "pip>=24" "setuptools==80.9.0" wheel \
   -i "${PYPI_INDEX}" \
   --extra-index-url "${ASCEND_INDEX}"
 
@@ -67,12 +67,14 @@ echo "[env] installing with ${PYTHON_BIN} ($("${PYTHON_BIN}" --version 2>&1))"
 
 "${PYTHON_BIN}" - <<'PY'
 import sys
+import pkg_resources  # noqa: F401
 import torch
 import torch_npu  # noqa: F401
 import vllm
 import vllm_ascend  # noqa: F401
 
 print("python", sys.version.split()[0])
+print("pkg_resources import ok")
 print("torch", torch.__version__)
 print("npu_available", torch.npu.is_available())
 print("vllm", vllm.__version__)

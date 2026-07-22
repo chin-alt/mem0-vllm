@@ -12,6 +12,9 @@
 # cannot solve the official Ascend pairing.
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
+# setuptools 82 removed pkg_resources, which is still imported by this stack.
+setuptools==80.9.0
+
 torch==2.7.1
 torch-npu==2.7.1
 torchvision==0.22.1
