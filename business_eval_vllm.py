@@ -53,6 +53,8 @@ MIN_TOKENIZERS_FOR_VLLM_0102 = "0.21.1"
 MAX_TOKENIZERS_FOR_VLLM_0102 = "0.22.0"
 TOKENIZER_CONFIG_MAX_COPY_BYTES = 128 * 1024 * 1024
 TOKENIZER_LARGE_SUFFIXES = {".bin", ".ckpt", ".pt", ".pth", ".safetensors"}
+MIN_ASCEND_VLLM_PYTHON = (3, 9)
+MAX_ASCEND_VLLM_PYTHON = (3, 12)
 
 
 QWEN3_RERANKER_PREFIX = (
@@ -215,6 +217,20 @@ def prepare_vllm_platform(device_backend: str) -> str:
                 "ASCEND_RT_VISIBLE_DEVICES is not set; vLLM Ascend will use the runtime-visible NPUs."
             )
     return resolved_backend
+
+
+def validate_vllm_python_runtime(device_backend: str) -> None:
+    if device_backend != "ascend":
+        return
+    current = sys.version_info[:2]
+    if MIN_ASCEND_VLLM_PYTHON <= current < MAX_ASCEND_VLLM_PYTHON:
+        return
+    current_text = ".".join(str(part) for part in sys.version_info[:3])
+    raise RuntimeError(
+        "This Ascend vLLM 0.11.x evaluator requires Python 3.9, 3.10, or 3.11; "
+        f"this process is using Python {current_text} at {sys.executable}. "
+        "Use the Python environment prepared by scripts/install_ascend_vllm_910b4.sh."
+    )
 
 
 def parse_json_object(text: str, option_name: str) -> dict[str, Any] | None:
@@ -391,7 +407,18 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_DATASETS_OFFLINE"] = "1"
-    device_backend = prepare_vllm_platform(getattr(args, "device_backend", "auto"))
+    device_backend = resolve_device_backend(getattr(args, "device_backend", "auto"))
+    validate_vllm_python_runtime(device_backend)
+    if device_backend == "ascend" and sys.version_info[:2] == (3, 9):
+        from vllm_py39_compat import patch_vllm_011_for_python39
+
+        changed = patch_vllm_011_for_python39()
+        if changed:
+            logger.info(
+                "Applied Python 3.9 compatibility patch to %d vLLM files.",
+                len(changed),
+            )
+    device_backend = prepare_vllm_platform(device_backend)
     setattr(args, "device_backend", device_backend)
     try:
         import tokenizers
@@ -400,8 +427,8 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
         import vllm
     except ImportError as exc:
         raise RuntimeError(
-            "business_eval_vllm.py requires vLLM. Install it on the Linux GPU "
-            "machine with: pip install -r requirements-vllm.txt"
+            "business_eval_vllm.py requires vLLM and the selected platform plugin. "
+            "For Ascend, install them with scripts/install_ascend_vllm_910b4.sh."
         ) from exc
     validate_vllm_python_stack(
         device_backend=device_backend,

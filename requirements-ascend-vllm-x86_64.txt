@@ -1,4 +1,5 @@
 # Ascend x86_64 vLLM stack. Use this only when the NPU host CPU architecture is x86_64.
+# Requires Python >=3.9,<3.12; Python 3.9 uses src/vllm_py39_compat.py.
 # The default requirements-ascend-vllm.txt targets aarch64 cloud hosts and avoids
 # download.pytorch.org because many Ascend clouds block external egress.
 --extra-index-url https://download.pytorch.org/whl/cpu
@@ -15,14 +16,19 @@ tokenizers==0.21.4
 fastapi>=0.115.0,<0.124.0
 opencv-python-headless<=4.11.0.86
 packaging==26.2
-peft==0.19.1
-accelerate==1.14.0
+peft==0.17.1; python_version == "3.9"
+peft==0.19.1; python_version >= "3.10"
+accelerate==1.10.1; python_version == "3.9"
+accelerate==1.14.0; python_version >= "3.10"
 pandas==2.3.3
 tqdm==4.68.4
 openpyxl==3.1.5
 sentencepiece==0.2.1
 safetensors==0.8.0
 huggingface_hub==0.36.2
-datasets==5.0.0
-scikit-learn==1.7.2
-scipy==1.15.3
+datasets==4.4.1; python_version == "3.9"
+datasets==5.0.0; python_version >= "3.10"
+scikit-learn==1.6.1; python_version == "3.9"
+scikit-learn==1.7.2; python_version >= "3.10"
+scipy==1.13.1; python_version == "3.9"
+scipy==1.15.3; python_version >= "3.10"

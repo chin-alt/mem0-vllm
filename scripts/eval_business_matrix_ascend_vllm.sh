@@ -32,7 +32,7 @@ Environment overrides:
   CONTINUE_ON_ERROR              Continue remaining runs after one failure. Default: 1
   SKIP_MISSING                   Skip missing model/data paths. Default: 1
   POST_RUN_SLEEP                 Seconds to wait after each run. Default: 2
-  PYTHON_BIN                     Python executable. Default: python
+  PYTHON_BIN                     Python 3.9-3.11 executable. Default: python
 
 Notes:
   Source the CANN/NNAL environment before running this script, or run inside the
@@ -81,6 +81,15 @@ POST_RUN_SLEEP="${POST_RUN_SLEEP:-2}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 QWEN3_RERANKER_4B_LORA_PATH="${QWEN3_RERANKER_4B_LORA_PATH:-${OUTPUTS_ROOT}/qwen3_reranker_4b_8x3090_lora_merged}"
 QWEN3_RERANKER_06B_LORA_PATH="${QWEN3_RERANKER_06B_LORA_PATH:-${OUTPUTS_ROOT}/qwen3_reranker_06b_lora_merged}"
+
+if ! "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if (3, 9) <= sys.version_info[:2] < (3, 12) else 1)'; then
+  python_version="$("${PYTHON_BIN}" --version 2>&1 || true)"
+  echo "[error] this vLLM-Ascend stack requires Python 3.9-3.11; ${PYTHON_BIN} is ${python_version}." >&2
+  echo "[error] run: bash scripts/install_ascend_vllm_910b4.sh" >&2
+  exit 2
+fi
+echo "[env] python=${PYTHON_BIN} ($("${PYTHON_BIN}" --version 2>&1))"
+"${PYTHON_BIN}" src/vllm_py39_compat.py --quiet
 
 is_full_model_dir() {
   local path="$1"

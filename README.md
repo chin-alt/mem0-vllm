@@ -1035,8 +1035,7 @@ The unified local entrypoint defaults to vLLM-Ascend:
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
-pip install -r requirements-ascend-vllm.txt \
-  -i https://mirrors.huaweicloud.com/repository/pypi/simple
+bash scripts/install_ascend_vllm_910b4.sh
 
 ASCEND_RT_VISIBLE_DEVICES=0 \
 DATA_ROOT=/path/to/data/latency_delay \
@@ -1044,7 +1043,7 @@ MODEL_ROOT=/path/to/Qwen3-Reranker-4B \
 OUTPUTS_ROOT=/path/to/outputs \
 BACKEND=vllm \
 DTYPE=float16 \
-BATCH_SIZE=32 \
+BATCH_SIZE=4 \
 MAX_LENGTH=2048 \
 bash scripts/eval_business_matrix_ascend_local.sh
 ```
@@ -1105,8 +1104,8 @@ The original CUDA environment has `torch==2.8.0`, `vllm==0.10.2`,
 `numpy==2.2.6`, `xformers`, `triton`, and many `nvidia-*` packages. Do not
 reuse that full lockfile on Ascend; keep the business/data packages, add
 `torch-npu`/`vllm-ascend`, and remove the CUDA-only packages. The Ascend
-requirements file keeps the original versions where they are compatible,
-including
+requirements file keeps the original versions where they are compatible. On
+Python 3.10+ this includes
 `transformers==4.55.2`, `tokenizers==0.21.4`, `accelerate==1.14.0`,
 `peft==0.19.1`, `pandas==2.3.3`, `openpyxl==3.1.5`, and `tqdm==4.68.4`.
 Do not install `vllm-ascend==0.10.2rc1` from the public mirrors: that wheel
@@ -1123,12 +1122,22 @@ stack:
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
-python -m venv .venv-ascend
-source .venv-ascend/bin/activate
-pip install --upgrade pip setuptools wheel
-pip install "numpy>=1.24.0,<2.0.0"
 bash scripts/install_ascend_vllm_910b4.sh
 ```
+
+Python 3.9 is supported by the published vLLM 0.11.0 metadata and by the
+`vllm-ascend` cp39 wheel. The vLLM 0.11.0 source accidentally contains three
+files with Python 3.10-style union annotations. The installer runs
+`src/vllm_py39_compat.py` after package installation to replace only those
+known annotations with `Optional`/`Union`; it is idempotent and keeps `.orig`
+backups next to changed files. The evaluation entrypoint applies the same
+checked patch automatically before importing vLLM.
+
+The requirements use Python markers to preserve the original package versions
+on Python 3.10+, while Python 3.9 receives the last compatible releases for
+`accelerate`, `peft`, `datasets`, `scikit-learn`, `scipy`, `Pillow`, `numba`,
+`llvmlite`, and `ray`. These packages cannot keep the newer pins on Python 3.9
+because their package metadata excludes that interpreter.
 
 Do not install `torch`, `torch-npu`, `vllm`, and `vllm-ascend` in one pip
 command. The public `vllm==0.11.0` wheel metadata depends on `torch==2.8.0`,
