@@ -1135,9 +1135,9 @@ checked patch automatically before importing vLLM.
 
 The requirements use Python markers to preserve the original package versions
 on Python 3.10+, while Python 3.9 receives the last compatible releases for
-`accelerate`, `peft`, `datasets`, `scikit-learn`, `scipy`, `Pillow`, `numba`,
-`llvmlite`, and `ray`. These packages cannot keep the newer pins on Python 3.9
-because their package metadata excludes that interpreter.
+packages whose newer releases dropped Python 3.9. The selected 3.9 versions
+still satisfy vLLM 0.11.0's minimum constraints and provide aarch64 wheels;
+Python 3.10+ retains the original newer pins.
 
 Do not install `torch`, `torch-npu`, `vllm`, and `vllm-ascend` in one pip
 command. The public `vllm==0.11.0` wheel metadata depends on `torch==2.8.0`,
