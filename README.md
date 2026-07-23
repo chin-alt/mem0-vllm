@@ -1737,6 +1737,35 @@ If LoCoMo `NDCG@10` is unexpectedly low, first open
 `prediction_summary.inverted_NDCG@10`, and
 `prediction_summary.positive_minus_negative_score_mean`.
 
+To compare two LoCoMo runs and find cases where MemReranker beats a Qwen
+soft-label run:
+
+```bash
+BETTER_EVAL_DIR=outputs/locomo_mem_4blora_vllm_dp \
+WORSE_EVAL_DIR=outputs/locomo_qwen_4blora_vlllm_dp \
+BETTER_NAME=mem_reranker \
+WORSE_NAME=qwen_soft_label \
+TEST_FILE=data/locomo/locomo_qwen3_embedding_candidates.jsonl \
+OUTPUT_DIR=outputs/locomo_mem_vs_qwen_cases \
+MIN_DELTA=0.2 \
+WORSE_MAX_NDCG=0.5 \
+bash scripts/compare_locomo_runs.sh
+```
+
+This writes:
+
+```text
+comparison_summary.json
+query_comparison.csv/jsonl
+better_cases.csv/jsonl
+better_cases_report.md
+```
+
+`better_cases_report.md` is the easiest file to read. It shows each query,
+both models' `NDCG@10` and first positive rank, plus the top documents from
+both runs. Increase `MIN_DELTA` for cleaner high-confidence cases, or set
+`WORSE_MAX_NDCG=1.1` to disable the filter that requires the Qwen run to be bad.
+
 ## Prediction
 
 Prepare `docs.jsonl`:
