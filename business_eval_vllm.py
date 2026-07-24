@@ -94,12 +94,14 @@ def format_qwen3_generate_prompts(
     instruction: str,
 ) -> list[str]:
     """Format full prompts for the official Qwen3-Reranker vLLM logprob path."""
+    if len(queries) != len(documents):
+        raise ValueError(f"queries/documents length mismatch: {len(queries)} != {len(documents)}")
     return [
         (
             f"{QWEN3_RERANKER_PREFIX}<Instruct>: {instruction}\n\n"
             f"<Query>: {query}\n\n<Document>: {document}{QWEN3_RERANKER_SUFFIX}"
         )
-        for query, document in zip(queries, documents, strict=True)
+        for query, document in zip(queries, documents)
     ]
 
 
@@ -612,7 +614,7 @@ def score_with_vllm(
 
     indexed = [
         (idx, query, document, len(query) + len(document))
-        for idx, (query, document) in enumerate(zip(queries, documents, strict=True))
+        for idx, (query, document) in enumerate(zip(queries, documents))
     ]
     if sort_by_length:
         indexed.sort(key=lambda item: item[3], reverse=sort_descending)
@@ -665,7 +667,7 @@ def score_with_vllm(
         batch_seconds = time.perf_counter() - batch_start_time
         if len(outputs) != len(batch):
             raise ValueError(f"vLLM returned {len(outputs)} outputs for {len(batch)} input pairs")
-        for (original_idx, _, _, _), output in zip(batch, outputs, strict=True):
+        for (original_idx, _, _, _), output in zip(batch, outputs):
             if backend == "pooling":
                 scores[original_idx] = extract_vllm_score(output)
             else:

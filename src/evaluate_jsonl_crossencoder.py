@@ -155,7 +155,7 @@ def main() -> None:
     cuda_peak_memory = get_torch_cuda_memory_mib()
 
     rows = []
-    for ex, score, raw in zip(examples, scores, raw_records, strict=False):
+    for ex, score, raw in zip(examples, scores, raw_records):
         row = {
             "group_key": ex.group_key,
             "query": ex.query,

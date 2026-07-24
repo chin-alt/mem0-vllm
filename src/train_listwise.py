@@ -244,7 +244,7 @@ def compute_listwise_loss_numpy(
 
 def examples_to_records(examples: list[RerankerExample], scores: list[float]) -> list[dict[str, Any]]:
     rows = []
-    for ex, score in zip(examples, scores, strict=False):
+    for ex, score in zip(examples, scores):
         rows.append(
             {
                 "group_key": ex.group_key,
@@ -275,7 +275,7 @@ def evaluate_examples(
     )
     score_lookup = {
         int(ex.source_index): float(score)
-        for ex, score in zip(examples, scores, strict=False)
+        for ex, score in zip(examples, scores)
         if ex.source_index is not None
     }
     eval_groups = group_examples(examples, min_group_size=args.min_group_size)

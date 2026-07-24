@@ -73,7 +73,7 @@ def main() -> None:
     scores = scorer.predict(input_texts, batch_size=args.batch_size)
 
     ranked = []
-    for row, score in zip(docs, scores, strict=False):
+    for row, score in zip(docs, scores):
         item = {
             "doc": row["doc"],
             "score": float(score),

@@ -71,7 +71,7 @@ def main() -> None:
     )
 
     rows = []
-    for ex, score in zip(examples, scores, strict=False):
+    for ex, score in zip(examples, scores):
         row = {
             "group_key": ex.group_key,
             "query": ex.query,

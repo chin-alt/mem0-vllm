@@ -88,7 +88,7 @@ def main() -> None:
     )
 
     ranked = []
-    for row, score in zip(docs, scores, strict=False):
+    for row, score in zip(docs, scores):
         ranked.append(
             {
                 "doc": row["doc"],

@@ -319,7 +319,7 @@ def main() -> None:
     examples_per_sec = len(scores) / score_time if score_time > 0 else 0.0
 
     rows = []
-    for ex, score, raw in zip(examples, scores, raw_records, strict=False):
+    for ex, score, raw in zip(examples, scores, raw_records):
         row = {
             "group_key": ex.group_key,
             "query": ex.query,

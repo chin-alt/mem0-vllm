@@ -203,7 +203,7 @@ def summarize_group(rows: list[dict[str, Any]], relevance_threshold: float, ndcg
     ndcg = 0.0 if ideal <= 0 else dcg(labels, order_score, ndcg_k) / ideal
     relevant_positions = [idx + 1 for idx, flag in enumerate(relevant.tolist()) if flag]
     first_positive_rank = min(relevant_positions) if relevant_positions else 0
-    positive_rows = [row for row, flag in zip(ranked, relevant.tolist(), strict=False) if flag]
+    positive_rows = [row for row, flag in zip(ranked, relevant.tolist()) if flag]
     top_docs = []
     for rank, row in enumerate(ranked[:top_k_docs], start=1):
         top_docs.append(

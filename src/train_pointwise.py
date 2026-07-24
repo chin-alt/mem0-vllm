@@ -143,7 +143,7 @@ def load_train_dev_test(args: argparse.Namespace) -> tuple[dict[str, list[Rerank
 
 def examples_to_records(examples: list[RerankerExample], scores: list[float]) -> list[dict[str, Any]]:
     rows = []
-    for ex, score in zip(examples, scores, strict=False):
+    for ex, score in zip(examples, scores):
         rows.append(
             {
                 "group_key": ex.group_key,

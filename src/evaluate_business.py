@@ -301,7 +301,7 @@ def attach_scores_and_ranks(
     save_doc_text: bool,
 ) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row, score in zip(mapping, scores, strict=False):
+    for row, score in zip(mapping, scores):
         gt_item = ground_truth.get(row["query"])
         gt_ids = gt_item.doc_id_set if gt_item is not None else set()
         item = {

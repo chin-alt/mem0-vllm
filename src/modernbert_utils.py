@@ -203,7 +203,7 @@ def predict_modernbert_pairs(
 
 def examples_to_prediction_rows(examples: list[RerankerExample], scores: list[float]) -> list[dict[str, Any]]:
     rows = []
-    for ex, score in zip(examples, scores, strict=False):
+    for ex, score in zip(examples, scores):
         rows.append(
             {
                 "group_key": ex.group_key,

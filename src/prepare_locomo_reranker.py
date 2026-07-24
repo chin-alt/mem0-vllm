@@ -363,7 +363,7 @@ def build_sample_candidates(
             )
         ]
 
-    for (qa_idx, qa, question, evidence_ids, positive_ids), ranked in zip(eligible, ranked_by_query, strict=False):
+    for (qa_idx, qa, question, evidence_ids, positive_ids), ranked in zip(eligible, ranked_by_query):
         candidate_doc_indices = [doc_idx for doc_idx, _score in ranked]
         retrieval_scores = {doc_idx: float(score) for doc_idx, score in ranked}
         if args.ensure_positives:
