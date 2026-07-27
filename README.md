@@ -1291,7 +1291,7 @@ MODEL_NAME=qwen3_reranker_4b \
 MODEL_PATH=/path/to/Qwen3-Reranker-4B \
 DATA_ROOT=/path/to/data/latency_delay \
 OUTPUT_ROOT=/path/to/output \
-SCORING_BACKEND=pooling \
+SCORING_BACKEND=generate \
 DTYPE=float16 \
 MAX_LENGTH=8192 \
 BATCH_SIZE=32 \
@@ -1325,9 +1325,12 @@ npu-smi info -t board -i 0
 
 The `v0.10.0rc1-310p` image uses the CANN 8.2.RC1 generation of the userspace
 stack. Docker still uses the host NPU driver and firmware. On 310P this release
-does not support ACL Graph, so keep `ENFORCE_EAGER=1` and `DTYPE=float16`. Only
-treat the warning as a general driver-stack incompatibility if eager execution
-also fails.
+does not support ACL Graph, so keep `ENFORCE_EAGER=1` and `DTYPE=float16`. Use
+`SCORING_BACKEND=generate` for Qwen3-Reranker: it performs the official local
+yes/no-token scoring path through vLLM. Qwen3-Reranker pooling is currently
+listed for A2/A3, not 310P, and must not be assumed to be correct on this image.
+Only treat the warning as a general driver-stack incompatibility if eager
+generation also fails.
 
 Do not use `CUDA_VISIBLE_DEVICES`, `flash_attention_2`, or `bitsandbytes` for
 the Ascend run. If you need the slower Transformers fallback for debugging,
