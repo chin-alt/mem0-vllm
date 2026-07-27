@@ -156,9 +156,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_num_batched_tokens", type=int, default=32768)
     parser.add_argument("--max_num_seqs", type=int, default=256)
     parser.add_argument(
+        "--enforce_eager",
+        action="store_true",
+        help="Disable vLLM graph capture and execute the model in eager mode.",
+    )
+    parser.add_argument(
         "--additional_config",
         default=os.environ.get("VLLM_ADDITIONAL_CONFIG", ""),
         help="Optional JSON object passed to vLLM LLM(..., additional_config=...).",
+    )
+    parser.add_argument(
+        "--compilation_config",
+        default=os.environ.get("VLLM_COMPILATION_CONFIG", ""),
+        help="Optional JSON object passed to vLLM LLM(..., compilation_config=...).",
     )
     parser.add_argument(
         "--distributed_executor_backend",
@@ -441,6 +451,9 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
     validate_vllm_model_path(args.model_path, require_local=getattr(args, "local_files_only", False))
     tokenizer_path = prepare_vllm_tokenizer_path(args.model_path, args.output_dir)
     additional_config = parse_json_object(getattr(args, "additional_config", ""), "--additional_config")
+    compilation_config = parse_json_object(
+        getattr(args, "compilation_config", ""), "--compilation_config"
+    )
 
     scoring_backend = getattr(args, "scoring_backend", "pooling")
     llm_kwargs: dict[str, Any] = {
@@ -452,9 +465,12 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
         "max_num_batched_tokens": args.max_num_batched_tokens,
         "max_num_seqs": args.max_num_seqs,
         "enable_prefix_caching": args.enable_prefix_caching,
+        "enforce_eager": getattr(args, "enforce_eager", False),
     }
     if additional_config is not None:
         llm_kwargs["additional_config"] = additional_config
+    if compilation_config is not None:
+        llm_kwargs["compilation_config"] = compilation_config
     if getattr(args, "distributed_executor_backend", ""):
         llm_kwargs["distributed_executor_backend"] = args.distributed_executor_backend
     if getattr(args, "quantization", ""):
@@ -789,7 +805,9 @@ def main() -> None:
             "tensor_parallel_size": args.tensor_parallel_size,
             "max_num_batched_tokens": args.max_num_batched_tokens,
             "max_num_seqs": args.max_num_seqs,
+            "enforce_eager": args.enforce_eager,
             "additional_config": args.additional_config,
+            "compilation_config": args.compilation_config,
             "distributed_executor_backend": args.distributed_executor_backend,
             "quantization": args.quantization,
             "sort_by_length": args.sort_by_length,

@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Run vLLM-Ascend business reranker evaluation on Ascend 910B4/Atlas A2 NPUs.
+Run vLLM-Ascend business reranker evaluation on Ascend Atlas NPUs.
 
 Environment overrides:
   OUTPUT_ROOT                    Output root. Default: outputs/business_matrix_ascend_vllm_<timestamp>
@@ -24,8 +24,10 @@ Environment overrides:
   TENSOR_PARALLEL_SIZE           vLLM tensor parallel size. Default: 1
   MAX_NUM_BATCHED_TOKENS         vLLM max_num_batched_tokens. Default: 8192
   MAX_NUM_SEQS                   vLLM max_num_seqs. Default: 64
+  ENFORCE_EAGER                  Disable ACL Graph capture. Default: 0
   ENABLE_PREFIX_CACHING          Enable vLLM prefix caching if supported. Default: 0
   VLLM_ADDITIONAL_CONFIG         Optional JSON object for LLM(..., additional_config=...).
+  VLLM_COMPILATION_CONFIG        Optional JSON object for LLM(..., compilation_config=...).
   VLLM_QUANTIZATION              Optional quantization name, e.g. ascend for W8A8 weights.
   LOCAL_FILES_ONLY               Force offline local model loading. Default: 1
   SKIP_EXISTING                  Skip a run if metrics.json already exists. Default: 1
@@ -67,6 +69,7 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
+ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
 SORT_BY_LENGTH="${SORT_BY_LENGTH:-1}"
 SORT_DESCENDING="${SORT_DESCENDING:-0}"
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
@@ -185,8 +188,14 @@ if [[ "${LOCAL_FILES_ONLY}" == "1" ]]; then
 fi
 
 optional_vllm_args=()
+if [[ "${ENFORCE_EAGER}" == "1" ]]; then
+  optional_vllm_args+=(--enforce_eager)
+fi
 if [[ -n "${VLLM_ADDITIONAL_CONFIG:-}" ]]; then
   optional_vllm_args+=(--additional_config "${VLLM_ADDITIONAL_CONFIG}")
+fi
+if [[ -n "${VLLM_COMPILATION_CONFIG:-}" ]]; then
+  optional_vllm_args+=(--compilation_config "${VLLM_COMPILATION_CONFIG}")
 fi
 if [[ -n "${VLLM_DISTRIBUTED_EXECUTOR_BACKEND:-}" ]]; then
   optional_vllm_args+=(--distributed_executor_backend "${VLLM_DISTRIBUTED_EXECUTOR_BACKEND}")

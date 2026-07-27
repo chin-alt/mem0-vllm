@@ -1277,6 +1277,58 @@ VLLM_ADDITIONAL_CONFIG='{"enable_flashcomm1": true}' \
 bash scripts/eval_business_matrix_ascend_vllm.sh
 ```
 
+### Atlas 300I / 310P container
+
+The vLLM Ascend project identifies `v0.10.0rc1-310p` as the stable
+experimental image for Atlas 300I Duo. If startup fails in
+`torch.npu.graph(...).capture_begin()` with
+`ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE`, first disable ACL Graph capture. This
+keeps inference on the NPU and only switches vLLM to eager execution:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 \
+MODEL_NAME=qwen3_reranker_4b \
+MODEL_PATH=/path/to/Qwen3-Reranker-4B \
+DATA_ROOT=/path/to/data/latency_delay \
+OUTPUT_ROOT=/path/to/output \
+SCORING_BACKEND=pooling \
+DTYPE=float16 \
+MAX_LENGTH=8192 \
+BATCH_SIZE=32 \
+MAX_NUM_BATCHED_TOKENS=8192 \
+MAX_NUM_SEQS=32 \
+ENFORCE_EAGER=1 \
+VLLM_COMPILATION_CONFIG='{"custom_ops":["none","+rms_norm","+rotary_embedding"]}' \
+bash scripts/eval_business_matrix_ascend_vllm.sh
+```
+
+Check the container stack and the host driver mounted into it before running:
+
+```bash
+python - <<'PY'
+import sys
+from importlib.metadata import version
+import torch
+import torch_npu
+
+print("python:", sys.version)
+print("torch:", torch.__version__)
+print("torch_npu:", torch_npu.__version__)
+for package in ("vllm", "vllm-ascend"):
+    print(f"{package}:", version(package))
+print("device:", torch.npu.get_device_name(0))
+PY
+cat /usr/local/Ascend/ascend-toolkit/latest/version.cfg
+cat /usr/local/Ascend/driver/version.info
+npu-smi info -t board -i 0
+```
+
+The `v0.10.0rc1-310p` image uses the CANN 8.2.RC1 generation of the userspace
+stack. Docker still uses the host NPU driver and firmware. On 310P this release
+does not support ACL Graph, so keep `ENFORCE_EAGER=1` and `DTYPE=float16`. Only
+treat the warning as a general driver-stack incompatibility if eager execution
+also fails.
+
 Do not use `CUDA_VISIBLE_DEVICES`, `flash_attention_2`, or `bitsandbytes` for
 the Ascend run. If you need the slower Transformers fallback for debugging,
 install `torch-npu`, set `ASCEND_RT_VISIBLE_DEVICES`, and run
