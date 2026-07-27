@@ -18,6 +18,9 @@ Environment overrides:
   VLLM_VERSION        Default: 0.11.0
   VLLM_ASCEND_VERSION Default: 0.11.0rc1
   REQUIREMENTS        Default: requirements-ascend-vllm.txt
+
+For an HDK 24.1.RC2.x host, run the version-locked wrapper instead:
+  bash scripts/install_ascend_vllm_hdk24rc2.sh
 EOF
 }
 
@@ -47,7 +50,7 @@ fi
 
 echo "[env] installing with ${PYTHON_BIN} ($("${PYTHON_BIN}" --version 2>&1))"
 
-"${PYTHON_BIN}" -m pip install --upgrade "pip>=24" "setuptools==80.9.0" wheel \
+"${PYTHON_BIN}" -m pip install --upgrade "pip>=24,<26" "setuptools==80.9.0" wheel \
   -i "${PYPI_INDEX}" \
   --extra-index-url "${ASCEND_INDEX}"
 
@@ -55,11 +58,15 @@ echo "[env] installing with ${PYTHON_BIN} ($("${PYTHON_BIN}" --version 2>&1))"
   -i "${PYPI_INDEX}" \
   --extra-index-url "${ASCEND_INDEX}"
 
-"${PYTHON_BIN}" -m pip install "vllm==${VLLM_VERSION}" --no-deps \
+VLLM_TARGET_DEVICE=empty "${PYTHON_BIN}" -m pip install "vllm==${VLLM_VERSION}" \
+  --no-deps \
+  --no-build-isolation \
   -i "${PYPI_INDEX}" \
   --extra-index-url "${ASCEND_INDEX}"
 
-"${PYTHON_BIN}" -m pip install "vllm-ascend==${VLLM_ASCEND_VERSION}" --no-deps \
+"${PYTHON_BIN}" -m pip install "vllm-ascend==${VLLM_ASCEND_VERSION}" \
+  --no-deps \
+  --no-build-isolation \
   -i "${PYPI_INDEX}" \
   --extra-index-url "${ASCEND_INDEX}"
 

@@ -1,0 +1,96 @@
+# Ascend 910B/Atlas A2 stack for a fixed Ascend HDK 24.1.RC2.x driver.
+# Validated compatibility line:
+#   Python 3.9-3.11
+#   CANN/NNAL 8.1.RC1
+#   torch/torch-npu 2.5.1
+#   vLLM 0.8.5.post1 + vllm-ascend 0.8.5rc1
+#
+# vLLM and vllm-ascend are intentionally installed separately with --no-deps
+# and --no-build-isolation by scripts/install_ascend_vllm_hdk24rc2.sh. The
+# upstream vLLM metadata pins the CUDA torch build and cannot be resolved
+# together with torch-npu. On aarch64, vLLM 0.8.5 is built against the torch
+# 2.5.1 environment installed below.
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
+# Keep pkg_resources for older Ascend/vLLM dependencies.
+setuptools==80.9.0
+wheel==0.45.1
+setuptools-scm>=8,<9
+cmake>=3.26,<4
+ninja>=1.11,<2
+packaging==24.2
+pybind11>=2.13,<3
+decorator>=5.1,<6
+
+# Core Ascend framework versions from the vllm-ascend 0.8.5rc1 matrix.
+torch==2.5.1
+torch-npu==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
+numpy==1.26.4
+
+# Qwen3 generation support. Native Qwen3-Reranker pooling was added after
+# vLLM 0.8.5, so run this repository with SCORING_BACKEND=generate.
+transformers==4.51.3
+tokenizers==0.21.1
+huggingface_hub==0.30.2
+safetensors==0.5.3
+sentencepiece==0.2.0
+accelerate==1.6.0
+peft==0.15.2
+
+# vLLM 0.8.5.post1 runtime dependencies.
+cachetools>=5.5,<6
+psutil>=6.1,<8
+requests>=2.32,<3
+tqdm==4.67.1
+blake3>=1.0,<2
+py-cpuinfo==9.0.0
+protobuf>=5.29,<6
+fastapi[standard]>=0.115,<0.116
+aiohttp>=3.10,<3.12
+openai>=1.75,<2
+pydantic>=2.10,<3
+prometheus_client>=0.21,<1
+pillow>=11.1,<12
+prometheus-fastapi-instrumentator==7.1.0
+tiktoken>=0.9,<1
+lm-format-enforcer==0.10.11
+llguidance>=0.7.9,<0.8.0
+outlines==0.1.11
+lark==1.2.2
+xgrammar==0.1.18
+typing_extensions>=4.12,<5
+filelock>=3.16,<4
+partial-json-parser>=0.2.1.1.post5,<0.3
+pyzmq>=26,<28
+msgspec>=0.18,<0.20
+msgpack>=1.0,<2
+gguf>=0.13,<0.17
+importlib-metadata>=8,<9
+mistral_common[opencv]>=1.5.4,<1.6
+opencv-python-headless==4.11.0.86
+PyYAML>=6,<7
+einops>=0.8,<0.9
+compressed-tensors==0.9.3
+depyf==0.18.0
+cloudpickle>=3,<4
+watchfiles>=1,<2
+python-json-logger>=3,<4
+scipy==1.13.1
+opentelemetry-api==1.26.0
+opentelemetry-sdk==1.26.0
+opentelemetry-exporter-otlp==1.26.0
+opentelemetry-semantic-conventions-ai>=0.4.1,<0.5
+diskcache==5.6.3
+numba==0.60.0
+llvmlite==0.43.0
+ray[cgraph]==2.43.0
+quart>=0.20,<0.21
+six>=1.16,<2
+
+# Business Evaluation Matrix dependencies.
+pandas==2.2.3
+openpyxl==3.1.5
+scikit-learn==1.6.1
+datasets==3.6.0

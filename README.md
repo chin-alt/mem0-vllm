@@ -1048,6 +1048,46 @@ MAX_LENGTH=2048 \
 bash scripts/eval_business_matrix_ascend_local.sh
 ```
 
+For a cloud host whose driver is fixed at `24.1.rc2.3` (HDK 24.1.RC2), use
+the older official compatibility intersection instead of the default 0.11
+stack:
+
+```text
+CANN/NNAL    8.1.RC1
+Python       3.9-3.11
+torch        2.5.1
+torch-npu    2.5.1
+vLLM         0.8.5.post1
+vllm-ascend  0.8.5rc1
+transformers 4.51.3
+tokenizers   0.21.1
+numpy        1.26.4
+```
+
+Install that profile with:
+
+```bash
+# Install the matching CANN user-space packages first; do not reinstall the
+# host driver, firmware, or MCU:
+#   Ascend-cann-toolkit_8.1.RC1_linux-aarch64.run
+#   Ascend-cann-kernels-910b_8.1.RC1_linux-aarch64.run
+#   Ascend-cann-nnal_8.1.RC1_linux-aarch64.run
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+bash scripts/install_ascend_vllm_hdk24rc2.sh
+```
+
+Qwen3 generation is supported on this vLLM-Ascend line, but native
+Qwen3-Reranker pooling was added later. Keep inference local and score the
+model's yes/no token probabilities through the generation runner:
+
+```bash
+SCORING_BACKEND=generate \
+BATCH_SIZE=1 \
+MAX_NUM_SEQS=1 \
+bash scripts/eval_business_matrix_ascend_vllm.sh
+```
+
 When `MODEL_ROOT` points directly to a Hugging Face model directory containing
 `config.json`, the Ascend vLLM script evaluates only that model. You can also
 be explicit:

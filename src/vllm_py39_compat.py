@@ -112,10 +112,7 @@ def patch_vllm_011_for_python39(
     if vllm_root is None:
         version = installed_vllm_version()
         if version.split("+", 1)[0] != SUPPORTED_VLLM_VERSION:
-            raise RuntimeError(
-                "The Python 3.9 compatibility patch is intentionally limited to "
-                f"vLLM {SUPPORTED_VLLM_VERSION}; installed version is {version}."
-            )
+            return []
         vllm_root = installed_vllm_root()
     else:
         vllm_root = vllm_root.resolve()
