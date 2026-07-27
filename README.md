@@ -1077,6 +1077,21 @@ source /usr/local/Ascend/nnal/atb/set_env.sh
 bash scripts/install_ascend_vllm_hdk24rc2.sh
 ```
 
+Verify package versions, CANN/NNAL visibility, and a real NPU tensor operation:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 \
+python scripts/verify_ascend_vllm_hdk24rc2.py
+```
+
+Pass a local model path to also initialize vLLM and complete one generation:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 \
+python scripts/verify_ascend_vllm_hdk24rc2.py \
+  --model-path /path/to/Qwen3-Reranker-4B
+```
+
 Qwen3 generation is supported on this vLLM-Ascend line, but native
 Qwen3-Reranker pooling was added later. Keep inference local and score the
 model's yes/no token probabilities through the generation runner:
