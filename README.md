@@ -2030,13 +2030,16 @@ unable to identify the device (`drvErr=87`). If the inference image does not
 contain `openpyxl`, the launcher installs `openpyxl==3.1.5` from the Huawei
 Cloud PyPI mirror before reading the business Excel files.
 
-The `0.10.2rc1` Ascend plugin has two 310P pooling startup defects. Its ATB
-warm-up calls an unsupported FP32 operation, and its custom scheduler mistakes
-the encoder-only model's one-block placeholder for a 128-token KV cache. The
-launcher applies a version-checked source patch that skips the optional ATB
-warm-up and keeps pooling models on vLLM's native V1 scheduler. Generative
-models continue to use the Ascend scheduler. Set `PATCH_ATB_WARMUP=0` only for
-diagnosis or when using a rebuilt image that already includes both fixes.
+The `0.10.2rc1` Ascend plugin has three 310P pooling defects. Its ATB warm-up
+calls an unsupported FP32 operation, its custom scheduler mistakes the
+encoder-only model's one-block placeholder for a 128-token KV cache, and its
+model runner omits encoder-only attention metadata. The launcher applies a
+version-checked source patch that skips the optional ATB warm-up, keeps pooling
+models on vLLM's native V1 scheduler, and backports the encoder-only metadata
+and `_npu_flash_attention` dispatch used by the later 310P implementation.
+Generative models continue to use the Ascend scheduler. Set
+`PATCH_ATB_WARMUP=0` only for diagnosis or when using a rebuilt image that
+already includes all three fixes.
 
 ```bash
 HOST_REPO_PATH=/home/reranker_experiment/mem0-vllm \
