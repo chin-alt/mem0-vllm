@@ -2030,6 +2030,14 @@ unable to identify the device (`drvErr=87`). If the inference image does not
 contain `openpyxl`, the launcher installs `openpyxl==3.1.5` from the Huawei
 Cloud PyPI mirror before reading the business Excel files.
 
+The `0.10.2rc1` Ascend plugin has two 310P pooling startup defects. Its ATB
+warm-up calls an unsupported FP32 operation, and its custom scheduler mistakes
+the encoder-only model's one-block placeholder for a 128-token KV cache. The
+launcher applies a version-checked source patch that skips the optional ATB
+warm-up and keeps pooling models on vLLM's native V1 scheduler. Generative
+models continue to use the Ascend scheduler. Set `PATCH_ATB_WARMUP=0` only for
+diagnosis or when using a rebuilt image that already includes both fixes.
+
 ```bash
 HOST_REPO_PATH=/home/reranker_experiment/mem0-vllm \
 HOST_DATA_PATH=/home/reranker_experiment/data/latency_delay \
@@ -2070,6 +2078,11 @@ Keep `ENFORCE_EAGER=1` for the first 310P run. This disables vLLM graph
 capture, but still uses vLLM's native GTE model instead of Hugging Face SDPA.
 The evaluator passes `truncate_prompt_tokens=MAX_LENGTH`, so long recall
 documents are truncated rather than rejected by vLLM.
+
+After patching, the engine log must not say that
+`vllm_ascend.core.scheduler.AscendScheduler` was selected. Warnings that an
+ordinary 171-216 token input exceeds a limit of 128 indicate that the old
+container process is still running or the launcher patch was disabled.
 
 ### torch-npu PFA fallback
 
