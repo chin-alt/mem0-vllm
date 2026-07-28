@@ -297,7 +297,8 @@ class MindIEClient:
             "stream": False,
             "temperature": 0.0,
             "top_p": 1.0,
-            "top_k": 0,
+            # MindIE uses -1 (not vLLM's 0) to disable top-k sampling.
+            "top_k": -1,
             "max_tokens": 1,
             "ignore_eos": True,
             "n": 1,

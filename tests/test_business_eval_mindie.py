@@ -89,6 +89,7 @@ class MindIEProtocolTests(unittest.TestCase):
         def fake_urlopen(req, timeout):
             payload = json.loads(req.data.decode())
             self.assertIsInstance(payload["prompt"], str)
+            self.assertEqual(payload["top_k"], -1)
             token = "yes" if "relevant" in payload["prompt"] else "no"
             top_logprobs = (
                 {"yes": -0.1, "no": -2.1}
