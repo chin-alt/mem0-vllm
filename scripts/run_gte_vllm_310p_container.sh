@@ -18,6 +18,7 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-${MAX_LENGTH}}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-${BATCH_SIZE}}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 INSTALL_EVAL_DEPS="${INSTALL_EVAL_DEPS:-1}"
+PATCH_ATB_WARMUP="${PATCH_ATB_WARMUP:-1}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.huaweicloud.com/repository/pypi/simple}"
 
 for path in "${HOST_REPO_PATH}" "${HOST_DATA_PATH}" "${HOST_MODEL_PATH}"; do
@@ -66,6 +67,7 @@ docker_args=(
   -e "MAX_NUM_SEQS=${MAX_NUM_SEQS}"
   -e "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
   -e "INSTALL_EVAL_DEPS=${INSTALL_EVAL_DEPS}"
+  -e "PATCH_ATB_WARMUP=${PATCH_ATB_WARMUP}"
   -e "PIP_INDEX_URL=${PIP_INDEX_URL}"
   -e ENFORCE_EAGER=1
   -e HF_HUB_OFFLINE=1
@@ -87,6 +89,9 @@ fi
 
 docker "${docker_args[@]}" "${IMAGE}" bash -lc '
   set -euo pipefail
+  if [[ "${PATCH_ATB_WARMUP}" == "1" ]]; then
+    python scripts/patch_vllm_ascend_0102_310p.py
+  fi
   python scripts/check_gte_vllm_310p_env.py --model_path "${MODEL_PATH}"
   if ! python -c "import openpyxl" >/dev/null 2>&1; then
     if [[ "${INSTALL_EVAL_DEPS}" != "1" ]]; then
