@@ -2079,3 +2079,15 @@ bash scripts/eval_business_gte_310p.sh
 Valid dataset names are `0428caption`, `0428keyword`, and `0625caption`. Start
 with FP16 on 310P. After the 512-token run passes, increase `MAX_LENGTH` to
 1024, 2048, or 8192 and reduce `BATCH_SIZE` when necessary.
+
+Set `DATASET=all` to run the same GTE model over all three business datasets
+and generate `summary_metrics.csv`, `summary_metrics.json`, and
+`summary_metrics.xlsx` under one output root:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 \
+DATA_ROOT=/home/reranker_experiment/data/latency_delay \
+MODEL_PATH=/home/reranker_experiment/model/gte-multilingual-reranker-base \
+DATASET=all DTYPE=fp16 BATCH_SIZE=16 MAX_LENGTH=512 \
+bash scripts/eval_business_gte_310p.sh
+```

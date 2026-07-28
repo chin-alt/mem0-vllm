@@ -257,8 +257,12 @@ def main() -> None:
         {
             "backend": "gte_torch_npu",
             "model_path": args.model_path,
+            "gt_file": args.gt_file,
+            "recall_file": args.recall_file,
+            "gt_doc_id_col": args.gt_doc_id_col,
             "device": args.device,
             "dtype": args.dtype,
+            "precision": args.dtype,
             "max_length": args.max_length,
             "batch_size": args.batch_size,
             "score_activation": args.score_activation,

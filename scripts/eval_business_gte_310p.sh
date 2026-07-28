@@ -24,60 +24,106 @@ if [[ -f /usr/local/Ascend/ascend-toolkit/latest/set_env.sh ]]; then
   set -u
 fi
 
-case "${DATASET}" in
-  0428caption)
-    DATASET_DIR="${DATA_ROOT}/0428caption"
-    RECALL_FILE="${RECALL_FILE:-${DATASET_DIR}/retrieve_id_caption_0416.json}"
-    GT_DOC_ID_COL="${GT_DOC_ID_COL:-PageId_new}"
-    ;;
-  0428keyword)
-    DATASET_DIR="${DATA_ROOT}/0428keyword"
-    RECALL_FILE="${RECALL_FILE:-${DATASET_DIR}/id_keywords_pair_new.json}"
-    GT_DOC_ID_COL="${GT_DOC_ID_COL:-PageId_new}"
-    ;;
-  0625caption)
-    DATASET_DIR="${DATA_ROOT}/0625caption"
-    RECALL_FILE="${RECALL_FILE:-${DATASET_DIR}/0625_raw_recall_result.json}"
-    GT_DOC_ID_COL="${GT_DOC_ID_COL:-PageId}"
-    ;;
-  *)
-    echo "Unsupported DATASET=${DATASET}; use 0428caption, 0428keyword, or 0625caption." >&2
-    exit 2
-    ;;
-esac
-
-if [[ -z "${GT_FILE:-}" ]]; then
-  if [[ "${DATASET}" == "0625caption" && -f "${DATASET_DIR}/gtfile-20260617.xlsx" ]]; then
-    GT_FILE="${DATASET_DIR}/gtfile-20260617.xlsx"
-  else
-    GT_FILE="$(find "${DATASET_DIR}" -maxdepth 1 -type f -name '*.xlsx' | sort | head -1)"
-  fi
+if [[ ! -e "${MODEL_PATH}" ]]; then
+  echo "[missing] ${MODEL_PATH}" >&2
+  exit 3
 fi
 
-for required in "${MODEL_PATH}" "${GT_FILE}" "${RECALL_FILE}"; do
-  if [[ ! -e "${required}" ]]; then
-    echo "[missing] ${required}" >&2
-    exit 3
+if [[ "${DATASET}" == "all" ]]; then
+  if [[ -n "${GT_FILE:-}" || -n "${RECALL_FILE:-}" || -n "${GT_DOC_ID_COL:-}" ]]; then
+    echo "GT_FILE, RECALL_FILE, and GT_DOC_ID_COL overrides are only valid for a single DATASET." >&2
+    exit 2
   fi
+  DATASETS=("0428caption" "0428keyword" "0625caption")
+else
+  DATASETS=("${DATASET}")
+fi
+
+run_dataset() {
+  local dataset_name="$1"
+  local dataset_dir="${DATA_ROOT}/${dataset_name}"
+  local recall_file=""
+  local gt_doc_id_col=""
+  local gt_file=""
+
+  if [[ ! -d "${dataset_dir}" ]]; then
+    echo "[missing] ${dataset_dir}" >&2
+    return 3
+  fi
+
+  case "${dataset_name}" in
+    0428caption)
+      recall_file="${DATA_ROOT}/0428caption/retrieve_id_caption_0416.json"
+      gt_doc_id_col="PageId_new"
+      ;;
+    0428keyword)
+      recall_file="${DATA_ROOT}/0428keyword/id_keywords_pair_new.json"
+      gt_doc_id_col="PageId_new"
+      ;;
+    0625caption)
+      recall_file="${DATA_ROOT}/0625caption/0625_raw_recall_result.json"
+      gt_doc_id_col="PageId"
+      ;;
+    *)
+      echo "Unsupported DATASET=${dataset_name}; use all, 0428caption, 0428keyword, or 0625caption." >&2
+      return 2
+      ;;
+  esac
+
+  if [[ "${DATASET}" != "all" ]]; then
+    recall_file="${RECALL_FILE:-${recall_file}}"
+    gt_doc_id_col="${GT_DOC_ID_COL:-${gt_doc_id_col}}"
+    gt_file="${GT_FILE:-}"
+  fi
+  if [[ -z "${gt_file}" ]]; then
+    if [[ "${dataset_name}" == "0625caption" && -f "${dataset_dir}/gtfile-20260617.xlsx" ]]; then
+      gt_file="${dataset_dir}/gtfile-20260617.xlsx"
+    else
+      gt_file="$(find "${dataset_dir}" -maxdepth 1 -type f -name '*.xlsx' -print -quit)"
+    fi
+  fi
+
+  local required=""
+  for required in "${gt_file}" "${recall_file}"; do
+    if [[ ! -e "${required}" ]]; then
+      echo "[missing] ${required}" >&2
+      return 3
+    fi
+  done
+
+  local run_dir="${OUTPUT_ROOT}/${dataset_name}__gte_multilingual_reranker_base"
+  echo "======================================================================"
+  echo "[gte] model=${MODEL_PATH}"
+  echo "[gte] dataset=${dataset_name} device=${DEVICE} dtype=${DTYPE}"
+  echo "[gte] max_length=${MAX_LENGTH} batch_size=${BATCH_SIZE}"
+  echo "[gte] output=${run_dir}"
+  echo "======================================================================"
+
+  "${PYTHON_BIN}" src/evaluate_business_gte_npu.py \
+    --gt_file "${gt_file}" \
+    --recall_file "${recall_file}" \
+    --model_path "${MODEL_PATH}" \
+    --output_dir "${run_dir}" \
+    --device "${DEVICE}" \
+    --dtype "${DTYPE}" \
+    --max_length "${MAX_LENGTH}" \
+    --batch_size "${BATCH_SIZE}" \
+    --gt_doc_id_col "${gt_doc_id_col}" \
+    --score_activation sigmoid \
+    --local_files_only
+
+  echo "[done] ${run_dir}/metrics.json"
+}
+
+mkdir -p "${OUTPUT_ROOT}"
+for dataset_name in "${DATASETS[@]}"; do
+  run_dataset "${dataset_name}"
 done
 
-RUN_DIR="${OUTPUT_ROOT}/${DATASET}__gte_multilingual_reranker_base"
-echo "[gte] model=${MODEL_PATH}"
-echo "[gte] dataset=${DATASET} device=${DEVICE} dtype=${DTYPE}"
-echo "[gte] max_length=${MAX_LENGTH} batch_size=${BATCH_SIZE}"
-echo "[gte] output=${RUN_DIR}"
+"${PYTHON_BIN}" src/summarize_business_matrix.py \
+  --output_root "${OUTPUT_ROOT}" \
+  --summary_csv "${OUTPUT_ROOT}/summary_metrics.csv" \
+  --summary_json "${OUTPUT_ROOT}/summary_metrics.json" \
+  --summary_xlsx "${OUTPUT_ROOT}/summary_metrics.xlsx"
 
-"${PYTHON_BIN}" src/evaluate_business_gte_npu.py \
-  --gt_file "${GT_FILE}" \
-  --recall_file "${RECALL_FILE}" \
-  --model_path "${MODEL_PATH}" \
-  --output_dir "${RUN_DIR}" \
-  --device "${DEVICE}" \
-  --dtype "${DTYPE}" \
-  --max_length "${MAX_LENGTH}" \
-  --batch_size "${BATCH_SIZE}" \
-  --gt_doc_id_col "${GT_DOC_ID_COL}" \
-  --score_activation sigmoid \
-  --local_files_only
-
-echo "[done] ${RUN_DIR}/metrics.json"
+echo "[done] matrix summary: ${OUTPUT_ROOT}/summary_metrics.xlsx"
