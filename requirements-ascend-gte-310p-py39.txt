@@ -5,6 +5,7 @@
 #   CANN:        8.0.RC2 (toolkit + 310P kernels)
 #   Python:      3.9.x
 #   PyTorch:     2.1.0 + torch-npu 2.1.0.post6
+#   Attention:   torch_npu.npu_prompt_flash_attention (FP16, BNSD)
 #
 # Install torch and torch-npu from matching cp39 wheels first. Then install this
 # file with --no-deps for torch/torch-npu if the cloud mirror tries to replace

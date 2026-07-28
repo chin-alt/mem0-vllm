@@ -1997,9 +1997,82 @@ The mock scorer is only for smoke tests. Do not use it for real experiments.
 ## GTE reranker on Ascend 310P
 
 `Alibaba-NLP/gte-multilingual-reranker-base` is an encoder-only sequence
-classification reranker. It does not require vLLM, MindIE, ATB, CUDA, Triton,
-or xformers. The 310P evaluator uses local `torch_npu` inference and preserves
-the Business Evaluation Matrix output format.
+classification reranker. The evaluator supports two fully local NPU backends
+and preserves the Business Evaluation Matrix output format:
+
+- `BACKEND=vllm` uses vLLM's native `GteNewForSequenceClassification` and
+  `LLM.score`, bypassing the model repository's PyTorch SDPA implementation.
+- `BACKEND=torch_npu` uses the local Transformers model with the explicit 310P
+  PromptFlashAttention patch described below.
+
+### vLLM 0.10.2 container
+
+GTE sequence-classification support first appears in vLLM 0.10.2. Use the
+matching 310P image; `v0.10.0rc1-310p` is the generally recommended stable
+310P image but does not contain the native GTE reranker architecture.
+
+```text
+image        quay.io/ascend/vllm-ascend:v0.10.2rc1-310p
+China mirror quay.nju.edu.cn/ascend/vllm-ascend:v0.10.2rc1-310p
+vLLM         0.10.2
+vllm-ascend  0.10.2rc1
+CANN         8.2.RC1 container userspace
+host driver  24.1.RC2.x
+```
+
+The script mounts the host driver into the container, validates the package
+versions and vLLM model registry, performs an NPU tensor smoke test, and then
+runs one dataset or the complete matrix with in-process `LLM.score`. It does
+not start an HTTP service.
+
+```bash
+HOST_REPO_PATH=/home/reranker_experiment/mem0-vllm \
+HOST_DATA_PATH=/home/reranker_experiment/data/latency_delay \
+HOST_MODEL_PATH=/home/reranker_experiment/model/GTE/GTE \
+HOST_OUTPUT_PATH=/home/reranker_experiment/output4b/business_matrix_GTE_vllm \
+DATASET=all \
+MAX_LENGTH=8192 \
+BATCH_SIZE=16 \
+PULL_IMAGE=1 \
+bash scripts/run_gte_vllm_310p_container.sh
+```
+
+For a restricted cloud that already has the image, set `PULL_IMAGE=0`. To use
+DaoCloud instead of the Nanjing University mirror, set:
+
+```bash
+IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:v0.10.2rc1-310p \
+PULL_IMAGE=1 bash scripts/run_gte_vllm_310p_container.sh
+```
+
+Inside an already-running `v0.10.2rc1-310p` container, run the same backend
+directly:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 \
+BACKEND=vllm \
+DATA_ROOT=/workspace/data/latency_delay \
+MODEL_PATH=/workspace/model/GTE/GTE \
+OUTPUT_ROOT=/workspace/output4b/business_matrix_GTE_vllm \
+DATASET=all DTYPE=float16 \
+BATCH_SIZE=16 MAX_LENGTH=8192 \
+MAX_NUM_BATCHED_TOKENS=8192 MAX_NUM_SEQS=16 \
+ENFORCE_EAGER=1 \
+bash scripts/eval_business_gte_310p.sh
+```
+
+Keep `ENFORCE_EAGER=1` for the first 310P run. This disables vLLM graph
+capture, but still uses vLLM's native GTE model instead of Hugging Face SDPA.
+The evaluator passes `truncate_prompt_tokens=MAX_LENGTH`, so long recall
+documents are truncated rather than rejected by vLLM.
+
+### torch-npu PFA fallback
+
+The default `ATTENTION_BACKEND=pfa` path explicitly replaces the model's
+PyTorch SDPA call with `torch_npu.npu_prompt_flash_attention`. This is required
+because automatic PyTorch SDPA dispatch does not select fused attention on
+310P. The evaluator converts GTE's additive padding mask to the full BOOL mask
+required by the 310P operator and reuses it across all encoder layers.
 
 The conservative Python 3.9 compatibility line used by this repository is:
 
@@ -2062,7 +2135,9 @@ source /home/reranker_experiment/gte310env/bin/activate
 
 ASCEND_RT_VISIBLE_DEVICES=0 python scripts/check_gte_310p_env.py \
   --model_path /home/reranker_experiment/model/gte-multilingual-reranker-base \
-  --device npu:0
+  --device npu:0 \
+  --attention_backend pfa \
+  --jit_compile
 ```
 
 Run exactly one GTE model on one business dataset:
@@ -2072,9 +2147,15 @@ ASCEND_RT_VISIBLE_DEVICES=0 \
 DATA_ROOT=/home/reranker_experiment/data/latency_delay \
 MODEL_PATH=/home/reranker_experiment/model/gte-multilingual-reranker-base \
 DATASET=0428caption \
-DTYPE=fp16 BATCH_SIZE=16 MAX_LENGTH=512 \
+DTYPE=fp16 ATTENTION_BACKEND=pfa JIT_COMPILE=1 \
+BATCH_SIZE=16 MAX_LENGTH=512 \
 bash scripts/eval_business_gte_310p.sh
 ```
+
+Use `ATTENTION_BACKEND=eager JIT_COMPILE=0` as the compatibility and accuracy
+baseline. Do not use `ATTENTION_BACKEND=sdpa` on 310P; it takes the unsupported
+math/format-conversion path that reports `can not cast format when output is
+input`. PFA on 310P requires `DTYPE=fp16`.
 
 Valid dataset names are `0428caption`, `0428keyword`, and `0625caption`. Start
 with FP16 on 310P. After the 512-token run passes, increase `MAX_LENGTH` to
@@ -2088,6 +2169,7 @@ and generate `summary_metrics.csv`, `summary_metrics.json`, and
 ASCEND_RT_VISIBLE_DEVICES=0 \
 DATA_ROOT=/home/reranker_experiment/data/latency_delay \
 MODEL_PATH=/home/reranker_experiment/model/gte-multilingual-reranker-base \
-DATASET=all DTYPE=fp16 BATCH_SIZE=16 MAX_LENGTH=512 \
+DATASET=all DTYPE=fp16 ATTENTION_BACKEND=pfa JIT_COMPILE=1 \
+BATCH_SIZE=16 MAX_LENGTH=512 \
 bash scripts/eval_business_gte_310p.sh
 ```

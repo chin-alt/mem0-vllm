@@ -7,6 +7,7 @@ import math
 import time
 
 from pathlib import Path
+from types import MethodType
 from typing import Any
 
 import numpy as np
@@ -41,6 +42,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", default="outputs/business_gte_310p")
     parser.add_argument("--device", default="npu:0")
     parser.add_argument("--dtype", choices=["fp16", "bf16", "fp32"], default="fp16")
+    parser.add_argument(
+        "--attention_backend",
+        choices=["pfa", "eager", "sdpa"],
+        default="pfa",
+        help="pfa uses the 310P PromptFlashAttention operator; eager is the compatibility fallback.",
+    )
+    parser.add_argument("--jit_compile", action="store_true")
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--pad_to_multiple_of", type=int, default=8)
@@ -101,9 +109,126 @@ def npu_synchronize(torch: Any) -> None:
         synchronize()
 
 
-def load_model_and_tokenizer(args: argparse.Namespace, torch: Any) -> tuple[Any, Any]:
+def validate_attention_backend(attention_backend: str, dtype: str) -> None:
+    if attention_backend == "pfa" and dtype != "fp16":
+        raise ValueError("Ascend 310P PromptFlashAttention only supports --dtype fp16")
+
+
+def _build_pfa_attention_mask(
+    attention_bias: Any,
+    query_length: int,
+    torch: Any,
+) -> Any:
+    if attention_bias is None:
+        return None
+    if attention_bias.ndim != 4:
+        raise ValueError(
+            "GTE PFA expects a four-dimensional attention bias, got "
+            f"shape={tuple(attention_bias.shape)}"
+        )
+
+    if attention_bias.dtype == torch.bool:
+        mask = attention_bias
+    else:
+        # Hugging Face extended masks use zero for valid keys and a large
+        # negative value for padding. PFA uses True/1 for masked positions.
+        mask = attention_bias < 0
+
+    if mask.shape[-2] == 1:
+        mask = mask.expand(mask.shape[0], mask.shape[1], query_length, mask.shape[-1])
+    elif mask.shape[-2] != query_length:
+        raise ValueError(
+            "GTE PFA attention mask query dimension does not match Q: "
+            f"mask={tuple(mask.shape)} query_length={query_length}"
+        )
+    return mask.contiguous()
+
+
+def install_gte_pfa_attention(model: Any, torch: Any, torch_npu: Any) -> int:
+    pfa = getattr(torch_npu, "npu_prompt_flash_attention", None)
+    if pfa is None:
+        raise RuntimeError(
+            "torch_npu.npu_prompt_flash_attention is unavailable. "
+            "Use CANN 8.0.RC2 with torch 2.1.0 and torch-npu 2.1.0.post6."
+        )
+
+    mask_cache: dict[str, Any] = {
+        "source": None,
+        "query_length": None,
+        "mask": None,
+    }
+
+    def pfa_attention(
+        self: Any,
+        query_states: Any,
+        key_states: Any,
+        value_states: Any,
+        attention_bias: Any,
+        head_mask: Any,
+    ) -> tuple[Any, None]:
+        if head_mask is not None:
+            raise RuntimeError("GTE PFA does not support head_mask")
+        if query_states.dtype != torch.float16:
+            raise RuntimeError(
+                f"Ascend 310P PFA requires fp16 Q/K/V, got {query_states.dtype}"
+            )
+
+        query = query_states.transpose(1, 2).contiguous()
+        key = key_states.transpose(1, 2).contiguous()
+        value = value_states.transpose(1, 2).contiguous()
+        query_length = int(query.shape[2])
+
+        if (
+            mask_cache["source"] is not attention_bias
+            or mask_cache["query_length"] != query_length
+        ):
+            mask_cache["source"] = attention_bias
+            mask_cache["query_length"] = query_length
+            mask_cache["mask"] = _build_pfa_attention_mask(
+                attention_bias,
+                query_length,
+                torch,
+            )
+
+        output = pfa(
+            query,
+            key,
+            value,
+            atten_mask=mask_cache["mask"],
+            num_heads=int(self.num_attention_heads),
+            scale_value=1.0 / math.sqrt(int(self.attention_head_size)),
+            pre_tokens=2147483647,
+            next_tokens=2147483647,
+            input_layout="BNSD",
+            sparse_mode=0,
+        )
+        return output.transpose(1, 2).contiguous(), None
+
+    patched = 0
+    for module in model.modules():
+        if not all(
+            hasattr(module, name)
+            for name in ("_attention", "num_attention_heads", "attention_head_size")
+        ):
+            continue
+        module._attention = MethodType(pfa_attention, module)
+        patched += 1
+    if patched == 0:
+        raise RuntimeError(
+            "Could not find GTE attention modules to patch. "
+            "Check that MODEL_PATH is gte-multilingual-reranker-base."
+        )
+    return patched
+
+
+def load_model_and_tokenizer(
+    args: argparse.Namespace,
+    torch: Any,
+    torch_npu: Any,
+) -> tuple[Any, Any]:
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+    validate_attention_backend(args.attention_backend, args.dtype)
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path,
         trust_remote_code=True,
@@ -114,7 +239,15 @@ def load_model_and_tokenizer(args: argparse.Namespace, torch: Any) -> tuple[Any,
         trust_remote_code=True,
         local_files_only=args.local_files_only,
         torch_dtype=resolve_dtype(torch, args.dtype),
+        # PFA replaces the eager implementation after loading. Instantiating
+        # eager here prevents Transformers from selecting SDPA automatically.
+        attn_implementation=(
+            "eager" if args.attention_backend == "pfa" else args.attention_backend
+        ),
     )
+    if args.attention_backend == "pfa":
+        patched = install_gte_pfa_attention(model, torch, torch_npu)
+        logger.info("Installed Ascend 310P PFA backend on %d GTE layers", patched)
     model.eval()
     model.to(args.device)
     return model, tokenizer
@@ -186,13 +319,19 @@ def main() -> None:
     if args.batch_size < 1 or args.max_length < 1:
         raise ValueError("--batch_size and --max_length must be positive")
 
+    validate_attention_backend(args.attention_backend, args.dtype)
     torch, _torch_npu = load_npu_stack()
     torch.npu.set_device(args.device)
+    set_compile_mode = getattr(torch.npu, "set_compile_mode", None)
+    if set_compile_mode is not None:
+        set_compile_mode(jit_compile=args.jit_compile)
     logger.info(
-        "Ascend runtime torch=%s torch_npu=%s device=%s",
+        "Ascend runtime torch=%s torch_npu=%s device=%s attention=%s jit_compile=%s",
         torch.__version__,
         getattr(_torch_npu, "__version__", "unknown"),
         args.device,
+        args.attention_backend,
+        args.jit_compile,
     )
 
     ground_truth = load_ground_truth(
@@ -215,7 +354,7 @@ def main() -> None:
         raise ValueError("No query-document pairs remain after matching recall data to ground truth")
 
     reset_torch_accelerator_memory_stats()
-    model, tokenizer = load_model_and_tokenizer(args, torch)
+    model, tokenizer = load_model_and_tokenizer(args, torch, _torch_npu)
     validate_rope_buffers(model, torch)
     queries = [str(row["query"]) for row in mapping]
     docs = [str(row["doc"]) for row in mapping]
@@ -266,6 +405,8 @@ def main() -> None:
             "max_length": args.max_length,
             "batch_size": args.batch_size,
             "score_activation": args.score_activation,
+            "attention_backend": args.attention_backend,
+            "jit_compile": args.jit_compile,
             "instruction": args.instruction,
             "warmup_seconds": warmup_seconds,
             "score_time_seconds": score_seconds,

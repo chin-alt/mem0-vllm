@@ -46,6 +46,9 @@ QWEN3_RERANKER_HF_OVERRIDES = {
     "classifier_from_token": ["no", "yes"],
     "is_original_qwen3_reranker": True,
 }
+GTE_RERANKER_HF_OVERRIDES = {
+    "architectures": ["GteNewForSequenceClassification"],
+}
 
 MIN_TRANSFORMERS_FOR_VLLM_0102 = "4.55.2"
 MAX_TRANSFORMERS_FOR_VLLM_0102 = "5.0.0"
@@ -105,13 +108,36 @@ def format_qwen3_generate_prompts(
     ]
 
 
+def format_gte_score_inputs(
+    queries: list[str],
+    documents: list[str],
+    instruction: str,
+) -> tuple[list[str], list[str]]:
+    if len(queries) != len(documents):
+        raise ValueError(f"queries/documents length mismatch: {len(queries)} != {len(documents)}")
+    clean_instruction = instruction.strip()
+    formatted_queries = [
+        f"{clean_instruction}\n\n{query.strip()}" if clean_instruction else query.strip()
+        for query in queries
+    ]
+    return formatted_queries, [document.strip() for document in documents]
+
+
+def pooling_hf_overrides(model_family: str) -> dict[str, Any]:
+    if model_family == "qwen3":
+        return QWEN3_RERANKER_HF_OVERRIDES
+    if model_family == "gte":
+        return GTE_RERANKER_HF_OVERRIDES
+    raise ValueError(f"Unsupported pooling model family: {model_family}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate business recall data with vLLM offline LLM.score reranking."
     )
     parser.add_argument("--gt_file", required=True, help="Excel/CSV file with query-doc ground truth.")
     parser.add_argument("--recall_file", required=True, help="JSON file with recalled docs per query.")
-    parser.add_argument("--model_path", default=DEFAULT_VLLM_MODEL, help="Qwen3-Reranker model path or HF id.")
+    parser.add_argument("--model_path", default=DEFAULT_VLLM_MODEL, help="Reranker model path or HF id.")
     parser.add_argument("--output_dir", default="outputs/business_eval_vllm")
     parser.add_argument("--instruction", default=DEFAULT_BUSINESS_INSTRUCTION)
     parser.add_argument("--gt_query_col", default="query")
@@ -122,12 +148,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_length", type=int, default=2048)
     parser.add_argument("--batch_size", type=int, default=256, help="Chunk size for vLLM score().")
     parser.add_argument(
+        "--model_family",
+        choices=["qwen3", "gte"],
+        default="qwen3",
+        help="Select the native vLLM reranker architecture and input formatting.",
+    )
+    parser.add_argument(
         "--scoring_backend",
         choices=["pooling", "generate"],
         default="pooling",
         help=(
-            "pooling uses vLLM LLM.score with Qwen3ForSequenceClassification override. "
-            "generate uses the official Qwen3-Reranker yes/no logprob prompt path."
+            "pooling uses vLLM LLM.score with the selected model-family override. "
+            "generate is available only for the Qwen3-Reranker yes/no logprob path."
         ),
     )
     parser.add_argument("--top_k_list", type=int, nargs="+", default=[1, 3, 5, 10])
@@ -239,7 +271,7 @@ def validate_vllm_python_runtime(device_backend: str) -> None:
         return
     current_text = ".".join(str(part) for part in sys.version_info[:3])
     raise RuntimeError(
-        "This Ascend vLLM 0.11.x evaluator requires Python 3.9, 3.10, or 3.11; "
+        "This Ascend vLLM evaluator requires Python 3.9, 3.10, or 3.11; "
         f"this process is using Python {current_text} at {sys.executable}. "
         "Use the Python environment prepared by scripts/install_ascend_vllm_910b4.sh."
     )
@@ -456,6 +488,9 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
     )
 
     scoring_backend = getattr(args, "scoring_backend", "pooling")
+    model_family = getattr(args, "model_family", "qwen3")
+    if model_family == "gte" and scoring_backend != "pooling":
+        raise ValueError("GTE reranking requires --scoring_backend pooling")
     llm_kwargs: dict[str, Any] = {
         "model": args.model_path,
         "dtype": args.dtype,
@@ -477,7 +512,12 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
         llm_kwargs["quantization"] = args.quantization
     if scoring_backend == "pooling":
         llm_kwargs["runner"] = "pooling"
-        llm_kwargs["hf_overrides"] = QWEN3_RERANKER_HF_OVERRIDES
+        llm_kwargs["hf_overrides"] = pooling_hf_overrides(model_family)
+        if model_family == "gte":
+            # GTE's local tokenizer/config files use custom Auto classes. The
+            # model itself is still the native vLLM implementation selected by
+            # the architecture override above.
+            llm_kwargs["trust_remote_code"] = True
     if tokenizer_path:
         llm_kwargs["tokenizer"] = tokenizer_path
     filtered_kwargs = filter_supported_kwargs(LLM, llm_kwargs, context="LLM")
@@ -497,6 +537,7 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
     setattr(llm, "_memranker_vllm_ascend_version", package_version("vllm-ascend") or "")
     setattr(llm, "_memranker_vllm_tokenizer_path", tokenizer_path or "")
     setattr(llm, "_memranker_scoring_backend", scoring_backend)
+    setattr(llm, "_memranker_model_family", model_family)
     setattr(llm, "_memranker_device_backend", device_backend)
     return llm
 
@@ -557,8 +598,9 @@ def extract_vllm_score(output: Any) -> float:
     raise ValueError(f"Could not extract a numeric score from vLLM output: {output!r}")
 
 
-def build_score_call_kwargs(llm: Any, instruction: str) -> dict[str, Any]:
+def build_score_call_kwargs(llm: Any, max_length: int) -> dict[str, Any]:
     requested_kwargs = {
+        "truncate_prompt_tokens": max_length,
         "use_tqdm": False,
     }
     return filter_supported_kwargs(llm.score, requested_kwargs, context="LLM.score")
@@ -620,6 +662,8 @@ def score_with_vllm(
     scoring_backend: str | None = None,
     model_path: str = "",
     local_files_only: bool = False,
+    model_family: str | None = None,
+    max_length: int | None = None,
 ) -> list[float]:
     if len(queries) != len(documents):
         raise ValueError(f"queries/documents length mismatch: {len(queries)} != {len(documents)}")
@@ -637,9 +681,14 @@ def score_with_vllm(
 
     scores: list[float | None] = [None] * len(indexed)
     backend = scoring_backend or getattr(llm, "_memranker_scoring_backend", "pooling")
+    resolved_model_family = model_family or getattr(llm, "_memranker_model_family", "qwen3")
     if backend not in {"pooling", "generate"}:
         raise ValueError(f"Unsupported scoring backend: {backend}")
-    score_kwargs = build_score_call_kwargs(llm, instruction=instruction) if backend == "pooling" else {}
+    score_kwargs = (
+        build_score_call_kwargs(llm, max_length=max_length)
+        if backend == "pooling" and max_length is not None
+        else {"use_tqdm": False} if backend == "pooling" else {}
+    )
     sampling_params = None
     yes_token_id = None
     no_token_id = None
@@ -667,11 +716,20 @@ def score_with_vllm(
         batch_max_chars = max(item[3] for item in batch)
         batch_start_time = time.perf_counter()
         if backend == "pooling":
-            formatted_queries, formatted_documents = format_qwen3_score_inputs(
-                batch_queries,
-                batch_documents,
-                instruction=instruction,
-            )
+            if resolved_model_family == "gte":
+                formatted_queries, formatted_documents = format_gte_score_inputs(
+                    batch_queries,
+                    batch_documents,
+                    instruction=instruction,
+                )
+            elif resolved_model_family == "qwen3":
+                formatted_queries, formatted_documents = format_qwen3_score_inputs(
+                    batch_queries,
+                    batch_documents,
+                    instruction=instruction,
+                )
+            else:
+                raise ValueError(f"Unsupported vLLM model family: {resolved_model_family}")
             outputs = llm.score(formatted_queries, formatted_documents, **score_kwargs)
         else:
             prompts = format_qwen3_generate_prompts(
@@ -767,6 +825,8 @@ def main() -> None:
         scoring_backend=args.scoring_backend,
         model_path=args.model_path,
         local_files_only=args.local_files_only,
+        model_family=args.model_family,
+        max_length=args.max_length,
     )
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(scores))
@@ -797,6 +857,7 @@ def main() -> None:
             "device_backend": args.device_backend,
             "vllm_runner": "pooling" if args.scoring_backend == "pooling" else "generate",
             "scoring_backend": args.scoring_backend,
+            "model_family": args.model_family,
             "vllm_version": getattr(llm, "_memranker_vllm_version", "unknown"),
             "vllm_ascend_version": getattr(llm, "_memranker_vllm_ascend_version", ""),
             "vllm_tokenizer_path": getattr(llm, "_memranker_vllm_tokenizer_path", ""),
