@@ -1993,3 +1993,89 @@ python src/predict.py --instruction "rank" --query "fast pocket camera delivery"
 ```
 
 The mock scorer is only for smoke tests. Do not use it for real experiments.
+
+## GTE reranker on Ascend 310P
+
+`Alibaba-NLP/gte-multilingual-reranker-base` is an encoder-only sequence
+classification reranker. It does not require vLLM, MindIE, ATB, CUDA, Triton,
+or xformers. The 310P evaluator uses local `torch_npu` inference and preserves
+the Business Evaluation Matrix output format.
+
+The conservative Python 3.9 compatibility line used by this repository is:
+
+```text
+Ascend host driver  24.1.RC2.x
+CANN                8.0.RC2 toolkit + 310P kernels
+Python              3.9.x
+torch               2.1.0
+torch-npu           2.1.0.post6
+transformers        4.39.1
+tokenizers          0.15.1
+```
+
+Do not install the CANN NNAL package for this backend. NNAL is used by ATB and
+MindIE components; this evaluator only needs the CANN toolkit and the matching
+310P binary kernels. Do not install `vllm`, `vllm-ascend`, `triton`, `xformers`,
+or any `nvidia-*` wheels into the GTE environment.
+
+Install the CANN user-space packages matching the host architecture. Keep the
+cloud host driver unchanged:
+
+```bash
+chmod +x Ascend-cann-toolkit_8.0.RC2_linux-aarch64.run
+chmod +x Ascend-cann-kernels-310p_8.0.RC2_linux-aarch64.run
+./Ascend-cann-toolkit_8.0.RC2_linux-aarch64.run --install
+./Ascend-cann-kernels-310p_8.0.RC2_linux-aarch64.run --install
+source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
+```
+
+Use the `x86_64` packages instead when `uname -m` returns `x86_64`. Create a
+clean Python 3.9 environment and install the matching cp39 torch wheels before
+the remaining packages:
+
+```bash
+python3.9 -m venv /home/reranker_experiment/gte310env
+source /home/reranker_experiment/gte310env/bin/activate
+python -m pip install --upgrade "pip<26" setuptools==68.2.2 wheel==0.41.3
+
+pip install torch==2.1.0 torch-npu==2.1.0.post6 \
+  -i https://mirrors.huaweicloud.com/repository/pypi/simple \
+  --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
+pip install -r requirements-ascend-gte-310p-py39.txt \
+  -i https://mirrors.huaweicloud.com/repository/pypi/simple \
+  --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+```
+
+If pip tries to replace the already installed torch wheels, install the
+non-framework dependencies separately with the versions in
+`requirements-ascend-gte-310p-py39.txt`; torch and torch-npu must remain an
+exact pair.
+
+The model directory must contain at least `config.json`, `model.safetensors`,
+`tokenizer.json`, and `tokenizer_config.json`. Validate the NPU and run a
+semantic model smoke test before the full experiment:
+
+```bash
+source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
+source /home/reranker_experiment/gte310env/bin/activate
+
+ASCEND_RT_VISIBLE_DEVICES=0 python scripts/check_gte_310p_env.py \
+  --model_path /home/reranker_experiment/model/gte-multilingual-reranker-base \
+  --device npu:0
+```
+
+Run exactly one GTE model on one business dataset:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 \
+DATA_ROOT=/home/reranker_experiment/data/latency_delay \
+MODEL_PATH=/home/reranker_experiment/model/gte-multilingual-reranker-base \
+DATASET=0428caption \
+DTYPE=fp16 BATCH_SIZE=16 MAX_LENGTH=512 \
+bash scripts/eval_business_gte_310p.sh
+```
+
+Valid dataset names are `0428caption`, `0428keyword`, and `0625caption`. Start
+with FP16 on 310P. After the 512-token run passes, increase `MAX_LENGTH` to
+1024, 2048, or 8192 and reduce `BATCH_SIZE` when necessary.
