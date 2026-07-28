@@ -2023,7 +2023,12 @@ host driver  24.1.RC2.x
 The script mounts the host driver into the container, validates the package
 versions and vLLM model registry, performs an NPU tensor smoke test, and then
 runs one dataset or the complete matrix with in-process `LLM.score`. It does
-not start an HTTP service.
+not start an HTTP service. On Huawei Cloud 310P hosts it uses privileged mode,
+mounts the complete host driver/firmware directories, and sets
+`ASCEND_RUNTIME_OPTIONS=NODRV`; mounting only `driver/lib64` can leave HAL
+unable to identify the device (`drvErr=87`). If the inference image does not
+contain `openpyxl`, the launcher installs `openpyxl==3.1.5` from the Huawei
+Cloud PyPI mirror before reading the business Excel files.
 
 ```bash
 HOST_REPO_PATH=/home/reranker_experiment/mem0-vllm \

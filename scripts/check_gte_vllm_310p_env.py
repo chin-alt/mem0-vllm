@@ -55,7 +55,7 @@ def main() -> None:
         "npu_available": torch.npu.is_available(),
         "npu_count": torch.npu.device_count(),
         "gte_architecture": GTE_ARCHITECTURE,
-        "gte_supported": ModelRegistry.is_model_supported(GTE_ARCHITECTURE),
+        "gte_supported": GTE_ARCHITECTURE in ModelRegistry.get_supported_archs(),
         "host_driver": read_ascend_version(
             "/usr/local/Ascend/driver/version.info", "Version"
         ),
