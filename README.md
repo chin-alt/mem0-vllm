@@ -1337,6 +1337,89 @@ the Ascend run. If you need the slower Transformers fallback for debugging,
 install `torch-npu`, set `ASCEND_RT_VISIBLE_DEVICES`, and run
 `src/evaluate_business.py` with `ATTN_IMPLEMENTATION=sdpa` or `eager`.
 
+### Atlas 300I / 310P MindIE
+
+MindIE is an alternative 310P backend when vLLM eager-generation latency is
+not acceptable. The target stack is:
+
+- host HDK/driver: `24.1.RC2.x` (leave it installed on the host)
+- container userspace: MindIE `2.1.RC1`, CANN `8.2.RC1`, ATB Models `2.1.RC1`
+- image: `swr.cn-south-1.myhuaweicloud.com/ascendhub/mindie:2.1.RC1-300I-Duo-py311-openeuler24.03-lts`
+
+The service and client stay on `127.0.0.1`; this is local NPU inference, not an
+external model API. Pull and start the service from the repository root:
+
+```bash
+docker pull swr.cn-south-1.myhuaweicloud.com/ascendhub/mindie:2.1.RC1-300I-Duo-py311-openeuler24.03-lts
+
+ASCEND_RT_VISIBLE_DEVICES=0 \
+HOST_MODEL_PATH=/home/reranker_experiment/Qwen3-Reranker-4B \
+MAX_LENGTH=8192 \
+MAX_BATCH_SIZE=32 \
+MAX_PREFILL_TOKENS=32768 \
+PULL_IMAGE=0 \
+bash scripts/run_mindie_310p_container.sh
+```
+
+The launcher backs up the model's original `config.json` as
+`config.json.memranker.bak` and changes its dtype to `float16`, which is needed
+on 310P. It also configures the ATB backend, one generated token, local-only
+HTTP, and disables Prefix Cache because MindIE logprobs cannot be combined with
+that feature.
+
+Check service health and one reranker response:
+
+```bash
+curl -fsS http://127.0.0.1:1025/health
+
+python - <<'PY'
+import json
+from urllib.request import Request, urlopen
+
+prompt = (
+    '<|im_start|>system\nJudge whether the Document meets the requirements '
+    'based on the Query and the Instruct provided. Note that the answer can '
+    'only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
+    '<Instruct>: Given a user query, retrieve relevant documents that answer the query.\n\n'
+    '<Query>: capital of China\n\n<Document>: Beijing is the capital of China.'
+    '<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n'
+)
+body = json.dumps({
+    'model': 'qwen3-reranker-4b', 'prompt': prompt, 'max_tokens': 1,
+    'temperature': 0, 'ignore_eos': True, 'logprobs': 5,
+}).encode()
+req = Request('http://127.0.0.1:1025/v1/completions', body,
+              {'Content-Type': 'application/json'})
+print(urlopen(req, timeout=600).read().decode())
+PY
+```
+
+Run one model against one business dataset:
+
+```bash
+BACKEND=mindie \
+DATA_ROOT=/home/reranker_experiment/data/latency_delay \
+DATASET_NAME=0428caption \
+MODEL_PATH=/home/reranker_experiment/Qwen3-Reranker-4B \
+MINDIE_MODEL_NAME=qwen3-reranker-4b \
+OUTPUT_ROOT=/home/output4b/mindie_0428caption \
+BATCH_SIZE=32 \
+MAX_REQUEST_CHARS=32000 \
+bash scripts/eval_business_matrix_ascend_local.sh
+```
+
+`BATCH_SIZE` is the number of concurrent loopback requests. MindIE performs the
+dynamic NPU batching. Start with `8`, then compare `16` and `32`; report both
+`seconds_per_example` and `examples_per_second` from `metrics.json`. The
+`REQUEST_MODE=list` option exists for later MindIE versions, but `concurrent`
+is the compatible default for `2.1.RC1`.
+
+MindIE lists the Qwen3 causal architecture on 300I Duo, but does not separately
+certify `Qwen3-Reranker-4B`. This path therefore uses the model's official
+one-token yes/no reranking prompt. If the image rejects the model architecture
+during startup, do not patch ATB model code in place; keep the vLLM eager path
+or move to a reranker-native serving stack.
+
 ## C-MTEB Retrieval Generalization
 
 C-MTEB Retrieval is a group of Hugging Face datasets rather than one local
