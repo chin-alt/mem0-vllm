@@ -33,8 +33,16 @@ done
 source_if_present() {
   local path="$1"
   if [[ -f "${path}" ]]; then
+    local restore_nounset=0
+    if [[ $- == *u* ]]; then
+      restore_nounset=1
+      set +u
+    fi
     # shellcheck disable=SC1090
     source "${path}"
+    if [[ "${restore_nounset}" == "1" ]]; then
+      set -u
+    fi
   fi
 }
 
