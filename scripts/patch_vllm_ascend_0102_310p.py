@@ -6,6 +6,8 @@ import importlib.metadata
 import importlib.util
 from pathlib import Path
 
+from packaging.version import InvalidVersion, Version
+
 
 SUPPORTED_VERSION = "0.10.2rc1"
 CALL = "        self._warm_up_atb()"
@@ -165,12 +167,30 @@ VLLM_LM_HEAD_BLOCK_REPLACEMENT = '''        model.lm_head = ParallelLMHead(model
 VLLM_LM_HEAD_MARKER = "MEMRANKER_QWEN3_LM_HEAD_PREFIX"
 
 
-def patch_worker(worker_path: Path, version: str) -> bool:
-    if version != SUPPORTED_VERSION:
+def has_supported_public_version(actual: str, expected: str) -> bool:
+    """Accept PEP 440 local builds of the exact supported public version.
+
+    The 310P image labels its vLLM wheel ``0.10.2+empty``. The ``+empty``
+    segment identifies the local wheel build; its public API/source version is
+    still 0.10.2 and is the exact source layout this patch validates below.
+    """
+
+    try:
+        return Version(actual).public == Version(expected).public
+    except InvalidVersion:
+        return False
+
+
+def require_supported_version(package: str, actual: str, expected: str) -> None:
+    if not has_supported_public_version(actual, expected):
         raise RuntimeError(
-            "Refusing to patch vllm-ascend version %s; expected %s"
-            % (version, SUPPORTED_VERSION)
+            "Refusing to patch %s version %s; expected %s (local build suffix allowed)"
+            % (package, actual, expected)
         )
+
+
+def patch_worker(worker_path: Path, version: str) -> bool:
+    require_supported_version("vllm-ascend", version, SUPPORTED_VERSION)
 
     source = worker_path.read_text(encoding="utf-8")
     if MARKER in source:
@@ -189,11 +209,7 @@ def patch_worker(worker_path: Path, version: str) -> bool:
 
 
 def patch_platform(platform_path: Path, version: str) -> bool:
-    if version != SUPPORTED_VERSION:
-        raise RuntimeError(
-            "Refusing to patch vllm-ascend version %s; expected %s"
-            % (version, SUPPORTED_VERSION)
-        )
+    require_supported_version("vllm-ascend", version, SUPPORTED_VERSION)
 
     source = platform_path.read_text(encoding="utf-8")
     if POOLING_MARKER in source:
@@ -221,11 +237,7 @@ def replace_exact(source: str, old: str, new: str, label: str) -> str:
 
 
 def patch_encoder_pooling(model_runner_path: Path, attention_path: Path, version: str) -> bool:
-    if version != SUPPORTED_VERSION:
-        raise RuntimeError(
-            "Refusing to patch vllm-ascend version %s; expected %s"
-            % (version, SUPPORTED_VERSION)
-        )
+    require_supported_version("vllm-ascend", version, SUPPORTED_VERSION)
 
     runner_source = model_runner_path.read_text(encoding="utf-8")
     attention_source = attention_path.read_text(encoding="utf-8")
@@ -282,11 +294,7 @@ def patch_quant_score_head(quant_config_path: Path, version: str) -> bool:
     ``score.weight`` in ``quant_model_description.json`` and may either raise a
     KeyError or try to quantize the synthetic one-row head.
     """
-    if version != SUPPORTED_VERSION:
-        raise RuntimeError(
-            "Refusing to patch vllm-ascend version %s; expected %s"
-            % (version, SUPPORTED_VERSION)
-        )
+    require_supported_version("vllm-ascend", version, SUPPORTED_VERSION)
 
     source = quant_config_path.read_text(encoding="utf-8")
     if QUANT_SCORE_MARKER in source:
@@ -315,10 +323,7 @@ def patch_vllm_qwen3_lm_head_prefix(adapters_path: Path, version: str) -> bool:
     ``".weight"`` and raises a KeyError before it can see that the exported
     ``lm_head.weight`` is FLOAT.
     """
-    if version != "0.10.2":
-        raise RuntimeError(
-            "Refusing to patch vllm version %s; expected 0.10.2" % version
-        )
+    require_supported_version("vllm", version, "0.10.2")
 
     source = adapters_path.read_text(encoding="utf-8")
     if VLLM_LM_HEAD_MARKER in source:
