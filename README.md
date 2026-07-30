@@ -1550,6 +1550,13 @@ the missing `lm_head` prefix in vLLM 0.10.2. These avoid the two empty/missing
 quantization-description key failures on this old stack. Start the quantized
 A/B run with:
 
+The same pinned vLLM-Ascend release unconditionally selects the fused
+`AddRmsNormQuant` operator for Qwen3 static W8A8, but the CANN 8.2 310P kernel
+package has no binary for that operator. The 310P patch leaves the ordinary
+RMSNorm modules in place so the existing W8A8 linear path performs separate
+`npu_quantize` and `npu_quant_matmul` calls. Matmul weights and activations
+remain INT8; only the unsupported norm/quant fusion is disabled.
+
 ```bash
 HOST_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8 \
 HOST_OUTPUT_BASE=/home/reranker_experiment/output/qwen3_310p_w8a8_ab \

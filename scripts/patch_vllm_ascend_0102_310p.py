@@ -165,6 +165,28 @@ VLLM_LM_HEAD_BLOCK_REPLACEMENT = '''        model.lm_head = ParallelLMHead(model
                                        prefix="lm_head")  # MEMRANKER_QWEN3_LM_HEAD_PREFIX
 '''
 VLLM_LM_HEAD_MARKER = "MEMRANKER_QWEN3_LM_HEAD_PREFIX"
+QWEN3_NORM_IMPORT = (
+    "from vllm_ascend.ops.layernorm import AddRMSNormW8A8Quant\n"
+)
+QWEN3_NORM_IMPORT_REPLACEMENT = (
+    "from vllm_ascend.ops.layernorm import AddRMSNormW8A8Quant\n"
+    "from vllm_ascend.utils import is_310p\n"
+)
+QWEN3_QKV_NORM_BLOCK = '''        if isinstance(self.self_attn.qkv_proj.quant_method.quant_method,
+                      AscendW8A8LinearMethod):
+'''
+QWEN3_QKV_NORM_BLOCK_REPLACEMENT = '''        if (not is_310p() and  # MEMRANKER_310P_DISABLE_ADD_RMS_NORM_QUANT
+                isinstance(self.self_attn.qkv_proj.quant_method.quant_method,
+                           AscendW8A8LinearMethod)):
+'''
+QWEN3_MLP_NORM_BLOCK = '''        if isinstance(self.mlp.gate_up_proj.quant_method.quant_method,
+                      AscendW8A8LinearMethod):
+'''
+QWEN3_MLP_NORM_BLOCK_REPLACEMENT = '''        if (not is_310p() and  # MEMRANKER_310P_DISABLE_ADD_RMS_NORM_QUANT
+                isinstance(self.mlp.gate_up_proj.quant_method.quant_method,
+                           AscendW8A8LinearMethod)):
+'''
+QWEN3_NORM_MARKER = "MEMRANKER_310P_DISABLE_ADD_RMS_NORM_QUANT"
 
 
 def has_supported_public_version(actual: str, expected: str) -> bool:
@@ -344,6 +366,45 @@ def patch_vllm_qwen3_lm_head_prefix(adapters_path: Path, version: str) -> bool:
     return True
 
 
+def patch_qwen3_310p_norm_quant(qwen3_path: Path, version: str) -> bool:
+    """Avoid AddRmsNormQuant, whose binary is absent on the pinned 310P stack.
+
+    Leaving the base RMSNorm modules in place makes AscendW8A8LinearMethod use
+    its existing FP16 -> npu_quantize -> npu_quant_matmul fallback. This keeps
+    static W8A8 matmuls while replacing only the unsupported fused norm op.
+    """
+
+    require_supported_version("vllm-ascend", version, SUPPORTED_VERSION)
+    source = qwen3_path.read_text(encoding="utf-8")
+    if QWEN3_NORM_MARKER in source:
+        return False
+
+    source = replace_exact(
+        source,
+        QWEN3_NORM_IMPORT,
+        QWEN3_NORM_IMPORT_REPLACEMENT,
+        "Qwen3 AddRMSNormW8A8Quant import",
+    )
+    source = replace_exact(
+        source,
+        QWEN3_QKV_NORM_BLOCK,
+        QWEN3_QKV_NORM_BLOCK_REPLACEMENT,
+        "Qwen3 QKV fused norm quant block",
+    )
+    source = replace_exact(
+        source,
+        QWEN3_MLP_NORM_BLOCK,
+        QWEN3_MLP_NORM_BLOCK_REPLACEMENT,
+        "Qwen3 MLP fused norm quant block",
+    )
+
+    backup = qwen3_path.with_suffix(qwen3_path.suffix + ".memranker.bak")
+    if not backup.exists():
+        backup.write_text(qwen3_path.read_text(encoding="utf-8"), encoding="utf-8")
+    qwen3_path.write_text(source, encoding="utf-8")
+    return True
+
+
 def restore_worker(worker_path: Path) -> bool:
     backup = worker_path.with_suffix(worker_path.suffix + ".memranker.bak")
     if not backup.exists():
@@ -386,6 +447,7 @@ def main() -> None:
     model_runner_path = package_path / "worker" / "model_runner_v1.py"
     attention_path = package_path / "attention" / "attention_v1.py"
     quant_config_path = package_path / "quantization" / "quant_config.py"
+    qwen3_path = package_path / "models" / "qwen3.py"
     adapters_path = vllm_path / "model_executor" / "models" / "adapters.py"
     if args.restore:
         restored = [
@@ -396,6 +458,7 @@ def main() -> None:
                 model_runner_path,
                 attention_path,
                 quant_config_path,
+                qwen3_path,
                 adapters_path,
             )
             if restore_worker(path)
@@ -418,6 +481,7 @@ def main() -> None:
         )
     quant_score_changed = False
     lm_head_changed = False
+    qwen3_norm_changed = patch_qwen3_310p_norm_quant(qwen3_path, version)
     if args.decoder_pooling_only:
         quant_score_changed = patch_quant_score_head(quant_config_path, version)
         lm_head_changed = patch_vllm_qwen3_lm_head_prefix(
@@ -446,6 +510,10 @@ def main() -> None:
             print("[patch] fixed the temporary Qwen3 pooling lm_head quantization key")
         else:
             print("[patch] Qwen3 pooling lm_head-prefix patch already applied")
+    if qwen3_norm_changed:
+        print("[patch] disabled unsupported Qwen3 AddRmsNormQuant on 310P")
+    else:
+        print("[patch] Qwen3 310P norm-quant fallback already applied")
 
 
 if __name__ == "__main__":
