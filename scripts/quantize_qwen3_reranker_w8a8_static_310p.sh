@@ -22,6 +22,8 @@ Important environment overrides:
   MODELSLIM_VENV           Dedicated Python venv directory.
   INSTALL_MODELSLIM        Clone/install the pinned ModelSlim branch if needed. Default: 1
   REINSTALL_MODELSLIM      Re-run ModelSlim installation. Default: 0
+  PIP_INDEX_URL            Python package index used by install.sh and pip.
+                           Default: https://pypi.tuna.tsinghua.edu.cn/simple
   QUANTIZE_DOWN_PROJ       Also quantize down_proj instead of conservative FP fallback. Default: 0
   RUN_BENCHMARK            Run FP16 and W8A8 vLLM-Ascend A/B after export. Default: 0
   BENCHMARK_DATA_PATH      Business benchmark root used when RUN_BENCHMARK=1.
@@ -59,6 +61,7 @@ MODELSLIM_VENV="${MODELSLIM_VENV:-/home/reranker_experiment/venvs/modelslim-vllm
 INSTALL_MODELSLIM="${INSTALL_MODELSLIM:-1}"
 REINSTALL_MODELSLIM="${REINSTALL_MODELSLIM:-0}"
 PYTHON_BOOTSTRAP="${PYTHON_BOOTSTRAP:-python3}"
+PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 QUANTIZE_DOWN_PROJ="${QUANTIZE_DOWN_PROJ:-0}"
 RUN_BENCHMARK="${RUN_BENCHMARK:-0}"
 BENCHMARK_DATA_PATH="${BENCHMARK_DATA_PATH:-/home/reranker_experiment/data/latency_delay}"
@@ -161,13 +164,17 @@ if [[ "${REINSTALL_MODELSLIM}" == "1" || ! -f "${install_stamp}" ]]; then
     exit 4
   fi
   # Activation makes install.sh use this dedicated environment while retaining
-  # host torch/torch_npu through --system-site-packages.
+  # host torch/torch_npu through --system-site-packages. PIP_INDEX_URL is
+  # exported so pip calls made inside install.sh use the same mirror.
   # shellcheck disable=SC1091
   source "${MODELSLIM_VENV}/bin/activate"
+  export PIP_INDEX_URL
+  echo "[modelslim] pip_index_url=${PIP_INDEX_URL}"
   pushd "${MODELSLIM_DIR}/msmodelslim" >/dev/null
   bash install.sh
   popd >/dev/null
   "${MODELSLIM_PYTHON}" -m pip install \
+    --index-url "${PIP_INDEX_URL}" \
     transformers==4.55.2 tokenizers==0.21.4 accelerate safetensors
   "${MODELSLIM_PYTHON}" -c 'import msmodelslim, transformers; print("[modelslim] transformers=" + transformers.__version__)'
   printf '%s\n' "${MODELSLIM_BRANCH}" > "${install_stamp}"

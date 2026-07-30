@@ -1449,6 +1449,14 @@ If ModelSlim is already installed, set `INSTALL_MODELSLIM=0` and point
 generated calibration manifest records input/output SHA-256 values, selected
 source indexes, token-length percentiles, and truncation counts.
 
+ModelSlim installation defaults to the Tsinghua PyPI mirror for both
+`install.sh` and the pinned Transformers dependencies. Override it when needed:
+
+```bash
+PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+bash scripts/quantize_qwen3_reranker_w8a8_static_310p.sh
+```
+
 ```bash
 python scripts/check_qwen3_reranker_w8a8_310p.py \
   --model-path /models/Qwen3-Reranker-0.6B-W8A8
