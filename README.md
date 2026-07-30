@@ -1511,6 +1511,10 @@ The CPU container intentionally does not mount the host driver. Since PyTorch
 `import torch`, the workflow exports `TORCH_DEVICE_BACKEND_AUTOLOAD=0` to stop
 the image's `torch_npu` package from trying to load the unavailable
 `libascend_hal.so`. This does not disable any operation used by CPU calibration.
+Transformers 4.55.2 additionally probes `torch_npu` explicitly while importing
+its Flash-Attention integration. The ModelSlim CPU launcher patches both of the
+Transformers `is_torch_npu_available` references to return false before any
+modeling module is imported, so this second probe cannot initialize the driver.
 
 ```bash
 python scripts/check_qwen3_reranker_w8a8_310p.py \

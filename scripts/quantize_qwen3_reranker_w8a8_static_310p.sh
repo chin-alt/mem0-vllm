@@ -169,8 +169,14 @@ MODELSLIM_PYTHON="${MODELSLIM_VENV}/bin/python"
 install_stamp="${MODELSLIM_VENV}/.memranker_${MODELSLIM_BRANCH}_installed"
 
 check_modelslim_imports() {
-  "${MODELSLIM_PYTHON}" - <<'PY'
+  "${MODELSLIM_PYTHON}" - "${REPO_ROOT}/scripts" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from run_modelslim_cpu import disable_transformers_npu_probe
+
 import transformers
+disable_transformers_npu_probe()
 from msmodelslim.pytorch.llm_ptq.anti_outlier import AntiOutlier, AntiOutlierConfig
 from msmodelslim.pytorch.llm_ptq.llm_ptq_tools import Calibrator, QuantConfig
 
@@ -334,7 +340,8 @@ fi
 
 echo "[step 2/3] exporting static W8A8 weights (CPU calibration)"
 pushd "$(dirname "${quant_script}")" >/dev/null
-"${MODELSLIM_PYTHON}" "${quant_script}" "${quant_args[@]}"
+"${MODELSLIM_PYTHON}" "${REPO_ROOT}/scripts/run_modelslim_cpu.py" \
+  "${quant_script}" "${quant_args[@]}"
 popd >/dev/null
 
 "${MODELSLIM_PYTHON}" - \
