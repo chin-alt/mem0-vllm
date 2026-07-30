@@ -16,9 +16,15 @@ from scripts.patch_vllm_ascend_0102_310p import (
     METADATA_FIELDS,
     POOLING_CONDITION,
     POOLING_MARKER,
+    QUANT_SCORE_ANCHOR,
+    QUANT_SCORE_MARKER,
+    VLLM_LM_HEAD_BLOCK,
+    VLLM_LM_HEAD_MARKER,
     BUILDER_BRANCH,
     patch_encoder_pooling,
     patch_platform,
+    patch_quant_score_head,
+    patch_vllm_qwen3_lm_head_prefix,
     patch_worker,
     restore_worker,
 )
@@ -94,3 +100,43 @@ class PatchVllmAscendTests(unittest.TestCase):
             self.assertEqual(
                 attention.read_text(encoding="utf-8"), attention_original
             )
+
+    def test_quantized_reranker_score_head_stays_float(self):
+        with tempfile.TemporaryDirectory() as directory:
+            quant_config = Path(directory) / "quant_config.py"
+            original = "def is_layer_skipped(self, prefix):\n%s    return False\n" % QUANT_SCORE_ANCHOR
+            quant_config.write_text(original, encoding="utf-8")
+
+            self.assertTrue(
+                patch_quant_score_head(quant_config, "0.10.2rc1")
+            )
+            self.assertIn(
+                QUANT_SCORE_MARKER,
+                quant_config.read_text(encoding="utf-8"),
+            )
+            self.assertFalse(
+                patch_quant_score_head(quant_config, "0.10.2rc1")
+            )
+            self.assertTrue(restore_worker(quant_config))
+            self.assertEqual(
+                quant_config.read_text(encoding="utf-8"), original
+            )
+
+    def test_qwen3_pooling_lm_head_has_quantization_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapters = Path(directory) / "adapters.py"
+            original = VLLM_LM_HEAD_BLOCK + "between\n" + VLLM_LM_HEAD_BLOCK
+            adapters.write_text(original, encoding="utf-8")
+
+            self.assertTrue(
+                patch_vllm_qwen3_lm_head_prefix(adapters, "0.10.2")
+            )
+            self.assertEqual(
+                adapters.read_text(encoding="utf-8").count(VLLM_LM_HEAD_MARKER),
+                2,
+            )
+            self.assertFalse(
+                patch_vllm_qwen3_lm_head_prefix(adapters, "0.10.2")
+            )
+            self.assertTrue(restore_worker(adapters))
+            self.assertEqual(adapters.read_text(encoding="utf-8"), original)

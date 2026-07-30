@@ -188,6 +188,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_num_batched_tokens", type=int, default=32768)
     parser.add_argument("--max_num_seqs", type=int, default=256)
     parser.add_argument(
+        "--warmup_pairs",
+        type=int,
+        default=0,
+        help=(
+            "Run this many query-document pairs once before timing. This is useful "
+            "for stable latency measurements on Ascend eager execution."
+        ),
+    )
+    parser.add_argument(
         "--enforce_eager",
         action="store_true",
         help="Disable vLLM graph capture and execute the model in eager mode.",
@@ -647,7 +656,49 @@ def build_generate_sampling_params(llm: Any, yes_token_id: int, no_token_id: int
         "allowed_token_ids": [yes_token_id, no_token_id],
     }
     filtered_kwargs = filter_supported_kwargs(SamplingParams, requested_kwargs, context="SamplingParams")
+    # When allowed_token_ids is supported, the only possible output tokens are
+    # yes and no. Returning 20 logprobs adds CPU serialization/post-processing
+    # work without adding information. Keep 20 only for older vLLM releases
+    # where allowed_token_ids is unavailable and yes/no must be found among the
+    # regular top logprobs.
+    if "allowed_token_ids" in filtered_kwargs and "logprobs" in filtered_kwargs:
+        filtered_kwargs["logprobs"] = 2
     return SamplingParams(**filtered_kwargs)
+
+
+def summarize_batch_latency(events: list[dict[str, Any]]) -> dict[str, float | int]:
+    valid_events = [
+        event
+        for event in events
+        if int(event.get("batch_size", 0)) > 0 and float(event.get("batch_seconds", -1.0)) >= 0
+    ]
+    if not valid_events:
+        return {
+            "num_timed_batches": 0,
+            "batch_latency_p50_seconds": 0.0,
+            "batch_latency_p95_seconds": 0.0,
+            "pair_latency_p50_seconds": 0.0,
+            "pair_latency_p95_seconds": 0.0,
+        }
+
+    batch_seconds = np.asarray(
+        [float(event["batch_seconds"]) for event in valid_events],
+        dtype=np.float64,
+    )
+    pair_seconds = np.asarray(
+        [
+            float(event["batch_seconds"]) / int(event["batch_size"])
+            for event in valid_events
+        ],
+        dtype=np.float64,
+    )
+    return {
+        "num_timed_batches": len(valid_events),
+        "batch_latency_p50_seconds": float(np.percentile(batch_seconds, 50)),
+        "batch_latency_p95_seconds": float(np.percentile(batch_seconds, 95)),
+        "pair_latency_p50_seconds": float(np.percentile(pair_seconds, 50)),
+        "pair_latency_p95_seconds": float(np.percentile(pair_seconds, 95)),
+    }
 
 
 def score_with_vllm(
@@ -813,6 +864,27 @@ def main() -> None:
     queries = [row["query"] for row in mapping]
     documents = [row["doc"] for row in mapping]
 
+    if args.warmup_pairs < 0:
+        raise ValueError("--warmup_pairs must be >= 0")
+    warmup_count = min(args.warmup_pairs, len(queries))
+    if warmup_count:
+        logger.info("Warming up vLLM with %d query-document pairs", warmup_count)
+        score_with_vllm(
+            llm,
+            queries=queries[:warmup_count],
+            documents=documents[:warmup_count],
+            batch_size=min(args.batch_size, warmup_count),
+            instruction=args.instruction,
+            sort_by_length=args.sort_by_length,
+            sort_descending=args.sort_descending,
+            scoring_backend=args.scoring_backend,
+            model_path=args.model_path,
+            local_files_only=args.local_files_only,
+            model_family=args.model_family,
+            max_length=args.max_length,
+        )
+
+    batch_latency_events: list[dict[str, Any]] = []
     start_time = time.perf_counter()
     scores = score_with_vllm(
         llm,
@@ -827,6 +899,7 @@ def main() -> None:
         local_files_only=args.local_files_only,
         model_family=args.model_family,
         max_length=args.max_length,
+        progress_callback=batch_latency_events.append,
     )
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(scores))
@@ -866,6 +939,7 @@ def main() -> None:
             "tensor_parallel_size": args.tensor_parallel_size,
             "max_num_batched_tokens": args.max_num_batched_tokens,
             "max_num_seqs": args.max_num_seqs,
+            "warmup_pairs": warmup_count,
             "enforce_eager": args.enforce_eager,
             "additional_config": args.additional_config,
             "compilation_config": args.compilation_config,
@@ -890,6 +964,7 @@ def main() -> None:
             "skipped_recall_queries_without_gt": skipped_queries,
         }
     )
+    metrics.update(summarize_batch_latency(batch_latency_events))
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

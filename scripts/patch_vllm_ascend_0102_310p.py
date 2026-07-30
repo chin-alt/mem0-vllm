@@ -143,6 +143,26 @@ ENCODER_FORWARD_REPLACEMENT = '''            # TODO: Remove this contiguous in t
 '''
 ENCODER_MARKER = "may_add_encoder_only_layers_to_kv_cache_config"
 ENCODER_FORWARD_MARKER = "attn_type == AttentionType.ENCODER_ONLY"
+QUANT_SCORE_ANCHOR = '        proj_name = prefix.split(".")[-1]\n'
+QUANT_SCORE_MARKER = "MEMRANKER_KEEP_SCORE_HEAD_FLOAT"
+QUANT_SCORE_GUARD = (
+    '        if proj_name == "score":\n'
+    "            # The Qwen3 reranker pooling conversion builds a tiny FP32 score\n"
+    "            # head from the original lm_head yes/no rows. Quantizing\n"
+    "            # this synthetic head is both unnecessary and incompatible\n"
+    "            # with older ModelSlim descriptions that have no score key.\n"
+    "            return True  # MEMRANKER_KEEP_SCORE_HEAD_FLOAT\n"
+)
+VLLM_LM_HEAD_BLOCK = '''        model.lm_head = ParallelLMHead(model.config.vocab_size,
+                                       model.config.hidden_size,
+                                       quant_config=quant_config)
+'''
+VLLM_LM_HEAD_BLOCK_REPLACEMENT = '''        model.lm_head = ParallelLMHead(model.config.vocab_size,
+                                       model.config.hidden_size,
+                                       quant_config=quant_config,
+                                       prefix="lm_head")  # MEMRANKER_QWEN3_LM_HEAD_PREFIX
+'''
+VLLM_LM_HEAD_MARKER = "MEMRANKER_QWEN3_LM_HEAD_PREFIX"
 
 
 def patch_worker(worker_path: Path, version: str) -> bool:
@@ -254,6 +274,71 @@ def patch_encoder_pooling(model_runner_path: Path, attention_path: Path, version
     return True
 
 
+def patch_quant_score_head(quant_config_path: Path, version: str) -> bool:
+    """Keep the converted Qwen3 sequence-classification head unquantized.
+
+    vLLM creates ``score`` dynamically from two rows of ``lm_head`` for the
+    original Qwen3 reranker. vllm-ascend 0.10.2rc1 otherwise looks up
+    ``score.weight`` in ``quant_model_description.json`` and may either raise a
+    KeyError or try to quantize the synthetic one-row head.
+    """
+    if version != SUPPORTED_VERSION:
+        raise RuntimeError(
+            "Refusing to patch vllm-ascend version %s; expected %s"
+            % (version, SUPPORTED_VERSION)
+        )
+
+    source = quant_config_path.read_text(encoding="utf-8")
+    if QUANT_SCORE_MARKER in source:
+        return False
+    if source.count(QUANT_SCORE_ANCHOR) != 1:
+        raise RuntimeError(
+            "Expected exactly one quant score anchor in %s; found %d"
+            % (quant_config_path, source.count(QUANT_SCORE_ANCHOR))
+        )
+
+    backup = quant_config_path.with_suffix(quant_config_path.suffix + ".memranker.bak")
+    if not backup.exists():
+        backup.write_text(source, encoding="utf-8")
+    quant_config_path.write_text(
+        source.replace(QUANT_SCORE_ANCHOR, QUANT_SCORE_ANCHOR + QUANT_SCORE_GUARD),
+        encoding="utf-8",
+    )
+    return True
+
+
+def patch_vllm_qwen3_lm_head_prefix(adapters_path: Path, version: str) -> bool:
+    """Give temporary Qwen3 pooling LM heads their real quantization key.
+
+    vLLM 0.10.2 recreates ``lm_head`` while deriving the Qwen3 score head but
+    omits ``prefix="lm_head"``. AscendQuantConfig consequently looks up
+    ``".weight"`` and raises a KeyError before it can see that the exported
+    ``lm_head.weight`` is FLOAT.
+    """
+    if version != "0.10.2":
+        raise RuntimeError(
+            "Refusing to patch vllm version %s; expected 0.10.2" % version
+        )
+
+    source = adapters_path.read_text(encoding="utf-8")
+    if VLLM_LM_HEAD_MARKER in source:
+        return False
+    if source.count(VLLM_LM_HEAD_BLOCK) != 2:
+        raise RuntimeError(
+            "Expected two Qwen3 pooling LM-head blocks in %s; found %d"
+            % (adapters_path, source.count(VLLM_LM_HEAD_BLOCK))
+        )
+
+    backup = adapters_path.with_suffix(adapters_path.suffix + ".memranker.bak")
+    if not backup.exists():
+        backup.write_text(source, encoding="utf-8")
+    adapters_path.write_text(
+        source.replace(VLLM_LM_HEAD_BLOCK, VLLM_LM_HEAD_BLOCK_REPLACEMENT),
+        encoding="utf-8",
+    )
+    return True
+
+
 def restore_worker(worker_path: Path) -> bool:
     backup = worker_path.with_suffix(worker_path.suffix + ".memranker.bak")
     if not backup.exists():
@@ -269,20 +354,45 @@ def installed_package_path() -> Path:
     return Path(next(iter(spec.submodule_search_locations)))
 
 
+def installed_vllm_path() -> Path:
+    spec = importlib.util.find_spec("vllm")
+    if spec is None or not spec.submodule_search_locations:
+        raise RuntimeError("vllm is not installed")
+    return Path(next(iter(spec.submodule_search_locations)))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--restore", action="store_true")
+    parser.add_argument(
+        "--decoder-pooling-only",
+        action="store_true",
+        help=(
+            "Apply only the shared 310P pooling fixes needed by decoder-only "
+            "models such as Qwen3-Reranker; skip the GTE encoder attention backport."
+        ),
+    )
     args = parser.parse_args()
 
     package_path = installed_package_path()
+    vllm_path = installed_vllm_path()
     worker_path = package_path / "worker" / "worker_v1.py"
     platform_path = package_path / "platform.py"
     model_runner_path = package_path / "worker" / "model_runner_v1.py"
     attention_path = package_path / "attention" / "attention_v1.py"
+    quant_config_path = package_path / "quantization" / "quant_config.py"
+    adapters_path = vllm_path / "model_executor" / "models" / "adapters.py"
     if args.restore:
         restored = [
             path
-            for path in (worker_path, platform_path, model_runner_path, attention_path)
+            for path in (
+                worker_path,
+                platform_path,
+                model_runner_path,
+                attention_path,
+                quant_config_path,
+                adapters_path,
+            )
             if restore_worker(path)
         ]
         if restored:
@@ -293,11 +403,21 @@ def main() -> None:
         return
 
     version = importlib.metadata.version("vllm-ascend")
+    vllm_version = importlib.metadata.version("vllm")
     worker_changed = patch_worker(worker_path, version)
     platform_changed = patch_platform(platform_path, version)
-    encoder_changed = patch_encoder_pooling(
-        model_runner_path, attention_path, version
-    )
+    encoder_changed = False
+    if not args.decoder_pooling_only:
+        encoder_changed = patch_encoder_pooling(
+            model_runner_path, attention_path, version
+        )
+    quant_score_changed = False
+    lm_head_changed = False
+    if args.decoder_pooling_only:
+        quant_score_changed = patch_quant_score_head(quant_config_path, version)
+        lm_head_changed = patch_vllm_qwen3_lm_head_prefix(
+            adapters_path, vllm_version
+        )
     if worker_changed:
         print("[patch] disabled unsupported 310P ATB warm-up in %s" % worker_path)
     else:
@@ -306,10 +426,21 @@ def main() -> None:
         print("[patch] selected the native vLLM scheduler for pooling models in %s" % platform_path)
     else:
         print("[patch] pooling scheduler patch already applied")
-    if encoder_changed:
+    if args.decoder_pooling_only:
+        print("[patch] skipped encoder-only attention backport for Qwen3 pooling")
+    elif encoder_changed:
         print("[patch] backported 310P encoder-only attention for pooling models")
     else:
         print("[patch] encoder-only attention patch already applied")
+    if args.decoder_pooling_only:
+        if quant_score_changed:
+            print("[patch] kept the converted Qwen3 reranker score head unquantized")
+        else:
+            print("[patch] Qwen3 reranker score-head patch already applied")
+        if lm_head_changed:
+            print("[patch] fixed the temporary Qwen3 pooling lm_head quantization key")
+        else:
+            print("[patch] Qwen3 pooling lm_head-prefix patch already applied")
 
 
 if __name__ == "__main__":

@@ -313,6 +313,7 @@ def main() -> None:
         scoring_backend=args.scoring_backend,
         model_path=args.model_path,
         local_files_only=args.local_files_only,
+        max_length=args.max_length,
     )
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(scores))

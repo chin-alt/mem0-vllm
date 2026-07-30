@@ -9,6 +9,7 @@ Environment overrides:
   OUTPUT_ROOT                    Output root. Default: outputs/business_matrix_ascend_vllm_<timestamp>
   ASCEND_RT_VISIBLE_DEVICES      NPU chip ids for evaluation. Default: 0
   DATA_ROOT                      Dataset root. Default: data/latency_delay
+  DATASET                        all, 0428caption, 0428keyword, or 0625caption. Default: all
   MODEL_ROOT                     Model root, or a single full model dir with config.json. Default: models
   OUTPUTS_ROOT                   LoRA merge output root. Default: outputs
   MODEL_NAME                     Optional single model name.
@@ -24,6 +25,7 @@ Environment overrides:
   TENSOR_PARALLEL_SIZE           vLLM tensor parallel size. Default: 1
   MAX_NUM_BATCHED_TOKENS         vLLM max_num_batched_tokens. Default: 8192
   MAX_NUM_SEQS                   vLLM max_num_seqs. Default: 64
+  WARMUP_PAIRS                   Untimed warm-up pairs before measurement. Default: 0
   ENFORCE_EAGER                  Disable ACL Graph capture. Default: 0
   ENABLE_PREFIX_CACHING          Enable vLLM prefix caching if supported. Default: 0
   VLLM_ADDITIONAL_CONFIG         Optional JSON object for LLM(..., additional_config=...).
@@ -58,6 +60,7 @@ export VLLM_DEVICE_BACKEND="${VLLM_DEVICE_BACKEND:-ascend}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/business_matrix_ascend_vllm_${RUN_TAG}}"
 DATA_ROOT="${DATA_ROOT:-${REPO_ROOT}/data/latency_delay}"
+DATASET="${DATASET:-all}"
 MODEL_ROOT="${MODEL_ROOT:-${REPO_ROOT}/models}"
 OUTPUTS_ROOT="${OUTPUTS_ROOT:-${REPO_ROOT}/outputs}"
 MAX_LENGTH="${MAX_LENGTH:-2048}"
@@ -69,6 +72,7 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
+WARMUP_PAIRS="${WARMUP_PAIRS:-0}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
 SORT_BY_LENGTH="${SORT_BY_LENGTH:-1}"
 SORT_DESCENDING="${SORT_DESCENDING:-0}"
@@ -161,6 +165,25 @@ GT_FILE_HINTS=(
   ""
   "gtfile-20260617.xlsx"
 )
+
+if [[ "${DATASET}" != "all" ]]; then
+  selected_index=""
+  for dataset_idx in "${!DATASET_NAMES[@]}"; do
+    if [[ "${DATASET_NAMES[$dataset_idx]}" == "${DATASET}" ]]; then
+      selected_index="${dataset_idx}"
+      break
+    fi
+  done
+  if [[ -z "${selected_index}" ]]; then
+    echo "Unsupported DATASET=${DATASET}; use all, 0428caption, 0428keyword, or 0625caption." >&2
+    exit 2
+  fi
+  DATASET_NAMES=("${DATASET_NAMES[$selected_index]}")
+  DATASET_DIRS=("${DATASET_DIRS[$selected_index]}")
+  RECALL_FILES=("${RECALL_FILES[$selected_index]}")
+  GT_DOC_ID_COLS=("${GT_DOC_ID_COLS[$selected_index]}")
+  GT_FILE_HINTS=("${GT_FILE_HINTS[$selected_index]}")
+fi
 
 read -r -a TOP_K_ARGS <<< "${TOP_K_LIST}"
 mkdir -p "${OUTPUT_ROOT}"
@@ -292,6 +315,7 @@ run_one() {
     --tensor_parallel_size "${TENSOR_PARALLEL_SIZE}" \
     --max_num_batched_tokens "${MAX_NUM_BATCHED_TOKENS}" \
     --max_num_seqs "${MAX_NUM_SEQS}" \
+    --warmup_pairs "${WARMUP_PAIRS}" \
     --expected_fbeta_beta "${EXPECTED_FBETA_BETA}" \
     --top_k_list "${TOP_K_ARGS[@]}" \
     "${sort_args[@]}" \

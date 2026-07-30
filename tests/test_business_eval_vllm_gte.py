@@ -11,13 +11,28 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from business_eval_vllm import (  # noqa: E402
     GTE_RERANKER_HF_OVERRIDES,
+    QWEN3_RERANKER_HF_OVERRIDES,
     format_gte_score_inputs,
+    format_qwen3_score_inputs,
     pooling_hf_overrides,
     score_with_vllm,
+    summarize_batch_latency,
 )
 
 
 class GteVllmTests(unittest.TestCase):
+    def test_qwen3_pooling_uses_two_token_classifier(self):
+        self.assertEqual(
+            pooling_hf_overrides("qwen3"),
+            QWEN3_RERANKER_HF_OVERRIDES,
+        )
+        queries, documents = format_qwen3_score_inputs(
+            ["query"], ["document"], "instruction"
+        )
+        self.assertIn("<Instruct>: instruction", queries[0])
+        self.assertIn("<Query>: query", queries[0])
+        self.assertIn("<Document>: document", documents[0])
+
     def test_gte_uses_native_vllm_architecture(self):
         self.assertEqual(
             pooling_hf_overrides("gte"),
@@ -61,6 +76,17 @@ class GteVllmTests(unittest.TestCase):
 
         self.assertEqual(scores, [10.0, 1.0])
         self.assertEqual(llm.calls[0][2:], (512, False))
+
+    def test_batch_latency_summary_reports_batch_and_pair_percentiles(self):
+        summary = summarize_batch_latency(
+            [
+                {"batch_seconds": 1.0, "batch_size": 2},
+                {"batch_seconds": 2.0, "batch_size": 4},
+            ]
+        )
+        self.assertEqual(summary["num_timed_batches"], 2)
+        self.assertEqual(summary["batch_latency_p50_seconds"], 1.5)
+        self.assertEqual(summary["pair_latency_p50_seconds"], 0.5)
 
 
 if __name__ == "__main__":

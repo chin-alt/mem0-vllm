@@ -1337,6 +1337,142 @@ the Ascend run. If you need the slower Transformers fallback for debugging,
 install `torch-npu`, set `ASCEND_RT_VISIBLE_DEVICES`, and run
 `src/evaluate_business.py` with `ATTN_IMPLEMENTATION=sdpa` or `eager`.
 
+#### Experimental low-latency Qwen3-Reranker path on HDK 24.1.RC2.x
+
+For `Qwen3-Reranker-0.6B`, try the sequence-classification pooling path before
+quantization. It replaces one-token generation plus full-vocabulary logprobs
+with the two-token yes/no classification head. The launcher keeps the host
+driver unchanged, uses the `v0.10.2rc1-310p` userspace image, applies only the
+decoder pooling fixes, runs a runtime preflight, warms up the model, and records
+batch/pair p50 and p95 latency:
+
+```bash
+HOST_REPO_PATH=/home/reranker_experiment/mem0-vllm \
+HOST_DATA_PATH=/home/reranker_experiment/data/latency_delay \
+HOST_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B \
+HOST_OUTPUT_PATH=/home/reranker_experiment/output/qwen3_pooling_fp16 \
+DATASET=0428caption \
+SCORING_BACKEND=pooling \
+MAX_LENGTH=1024 \
+BATCH_SIZE=16 \
+MAX_NUM_BATCHED_TOKENS=4096 \
+WARMUP_PAIRS=16 \
+PULL_IMAGE=0 \
+bash scripts/run_qwen3_reranker_vllm_310p_container.sh
+```
+
+The patch is version checked and reversible. For Qwen3 it skips the unrelated
+GTE encoder-only attention backport:
+
+```bash
+python scripts/patch_vllm_ascend_0102_310p.py --decoder-pooling-only
+python scripts/patch_vllm_ascend_0102_310p.py --restore
+```
+
+Run an FP16 generate-versus-pooling sweep with production data:
+
+```bash
+HOST_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B \
+HOST_OUTPUT_BASE=/home/reranker_experiment/output/qwen3_310p_ab \
+DATASET=0428caption \
+BACKENDS="generate pooling" \
+BATCH_SIZES="1 8 16 32" \
+MAX_LENGTHS="512 1024" \
+PULL_IMAGE=0 \
+bash scripts/benchmark_qwen3_reranker_310p.sh
+```
+
+Each `metrics.json` now contains `batch_latency_p50_seconds`,
+`batch_latency_p95_seconds`, `pair_latency_p50_seconds`, and
+`pair_latency_p95_seconds` (the last two are amortized batch time per pair).
+The sweep also writes `benchmark_summary.json`.
+
+Static W8A8 on this legacy stack remains experimental. Export only static
+per-tensor-activation/per-channel-weight W8A8 with a ModelSlim release whose
+`quant_model_description.json` is compatible with vLLM-Ascend 0.10.2. Keep
+`embed_tokens` and `lm_head` as `FLOAT`; vLLM creates the converted `score`
+head as unquantized FP32. Do not use dynamic/per-token W8A8. Before loading the
+model, run the read-only preflight:
+
+The repository includes an end-to-end exporter for the production training
+JSONL. It clones and installs the vLLM-compatible ModelSlim branch into a
+dedicated virtual environment, creates `inputs_pretokenized` calibration rows,
+truncates only the document so the Qwen3 answer-position suffix is retained,
+exports conservative static W8A8 weights, and validates the result. It never
+installs or changes the host driver:
+
+```bash
+cd /home/reranker_experiment/mem0-vllm
+
+TRAIN_JSONL=/home/reranker_experiment/data/split/train.jsonl \
+FLOAT_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B \
+QUANT_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8-static-safe \
+MAX_LENGTH=1024 \
+CALIB_SAMPLES=64 \
+CALIB_BACKEND=pooling \
+bash scripts/quantize_qwen3_reranker_w8a8_static_310p.sh
+```
+
+By default the calibration set is sampled deterministically across four length
+bins. `reason` and `labels` are not included in model inputs; keep the original
+JSONL as a separate accuracy set. The source must normally contain one common
+instruction. If production uses a different instruction, set it explicitly:
+
+```bash
+PRODUCTION_INSTRUCTION='你的线上 reranker instruction' \
+bash scripts/quantize_qwen3_reranker_w8a8_static_310p.sh
+```
+
+The safe first export leaves `lm_head` and every `down_proj` in floating point.
+After that passes accuracy and runtime checks, `QUANTIZE_DOWN_PROJ=1` creates a
+more aggressive candidate in a new `QUANT_MODEL_PATH`. Existing non-empty
+model output directories are never overwritten.
+
+To export and immediately run the matching FP16/W8A8 pooling A/B on the first
+execution, enable the optional benchmark stage:
+
+```bash
+TRAIN_JSONL=/home/reranker_experiment/data/split/train.jsonl \
+FLOAT_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B \
+QUANT_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8-static-safe \
+BENCHMARK_DATA_PATH=/home/reranker_experiment/data/latency_delay \
+BENCHMARK_DATASET=0428caption \
+BENCHMARK_BACKENDS=pooling \
+BENCHMARK_BATCH_SIZES='1 8 16 32' \
+RUN_BENCHMARK=1 \
+PULL_IMAGE=0 \
+bash scripts/quantize_qwen3_reranker_w8a8_static_310p.sh
+```
+
+If ModelSlim is already installed, set `INSTALL_MODELSLIM=0` and point
+`MODELSLIM_DIR` and `MODELSLIM_VENV` at the pinned checkout/environment. The
+generated calibration manifest records input/output SHA-256 values, selected
+source indexes, token-length percentiles, and truncation counts.
+
+```bash
+python scripts/check_qwen3_reranker_w8a8_310p.py \
+  --model-path /models/Qwen3-Reranker-0.6B-W8A8
+```
+
+The patch keeps the synthetic Qwen3 pooling `score` head unquantized and fixes
+the missing `lm_head` prefix in vLLM 0.10.2. These avoid the two empty/missing
+quantization-description key failures on this old stack. Start the quantized
+A/B run with:
+
+```bash
+HOST_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8 \
+HOST_OUTPUT_BASE=/home/reranker_experiment/output/qwen3_310p_w8a8_ab \
+MODEL_LABEL=w8a8 \
+VLLM_QUANTIZATION=ascend \
+BACKENDS="generate pooling" \
+PULL_IMAGE=0 \
+bash scripts/benchmark_qwen3_reranker_310p.sh
+```
+
+Treat W8A8 as successful only when it improves warm p50/p95 or throughput on
+the actual production length/batch distribution while preserving the business
+ranking metrics. A successful model load alone is not a performance result.
+
 ### Atlas 300I / 310P MindIE
 
 MindIE is an alternative 310P backend when vLLM eager-generation latency is
