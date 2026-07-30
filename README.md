@@ -1516,14 +1516,15 @@ its Flash-Attention integration. The ModelSlim CPU launcher patches both of the
 Transformers `is_torch_npu_available` references to return false before any
 modeling module is imported, so this second probe cannot initialize the driver.
 
-The pinned Qwen exporter now defaults to `ANTI_METHOD=m1`, matching the
-ModelSlim vLLM-compatible Qwen W8A8 recipe. Do not use `m2` for this Qwen3
-model: that legacy path calls `os_ln_fcs` and expects each linear layer to be a
-wrapper exposing `.module`, while Transformers loads Qwen3 projections as
-plain `torch.nn.Linear` objects. If the image's anti-outlier implementation is
-still incompatible, `ANTI_METHOD=none` omits only that preprocessing pass; the
-64-sample activation calibration and static W8A8 export still run. Validate
-ranking quality carefully because skipping SmoothQuant can reduce accuracy:
+The pinned Qwen3 exporter requires and defaults to `ANTI_METHOD=none`. Runtime
+traces on this exact image show that both `m1` (`smooth_ln_fcs`) and `m2`
+(`os_ln_fcs`) in the legacy compiled CANN overlay expect wrapper layers with a
+`.module` attribute, while Transformers loads Qwen3 projections as plain
+`torch.nn.Linear` objects. The pinned `quant_qwen.py` keeps AntiOutlier and the
+static Calibrator as separate stages: `none` omits only the incompatible
+AntiOutlier preprocessing, then still runs the 64-sample activation calibration
+and static W8A8 save. Validate ranking quality carefully because skipping
+SmoothQuant can reduce accuracy:
 
 ```bash
 PULL_IMAGE=0 \

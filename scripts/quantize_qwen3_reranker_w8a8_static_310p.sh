@@ -28,10 +28,10 @@ Important environment overrides:
   REINSTALL_MODELSLIM      Re-run ModelSlim installation. Default: 0
   PIP_INDEX_URL            Python package index used by install.sh and pip.
                            Default: https://pypi.tuna.tsinghua.edu.cn/simple
-  ANTI_METHOD              Anti-outlier method: m1 or none. Default: m1
-                           Use none to skip SmoothQuant while retaining static
-                           W8A8 calibration/export. m2 is incompatible with the
-                           plain Qwen3 Linear modules on this pinned stack.
+  ANTI_METHOD              Must be none on this pinned Qwen3 stack. Default: none
+                           Both m1 and m2 require wrapper layers exposing
+                           .module, but Transformers loads plain Qwen3 Linear
+                           layers. Static W8A8 calibration/export still runs.
   QUANTIZE_DOWN_PROJ       Also quantize down_proj instead of conservative FP fallback. Default: 0
   RUN_BENCHMARK            Run FP16 and W8A8 vLLM-Ascend A/B after export. Default: 0
   BENCHMARK_DATA_PATH      Business benchmark root used when RUN_BENCHMARK=1.
@@ -75,7 +75,7 @@ INSTALL_MODELSLIM="${INSTALL_MODELSLIM:-1}"
 REINSTALL_MODELSLIM="${REINSTALL_MODELSLIM:-0}"
 PYTHON_BOOTSTRAP="${PYTHON_BOOTSTRAP:-python3}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-ANTI_METHOD="${ANTI_METHOD:-m1}"
+ANTI_METHOD="${ANTI_METHOD:-none}"
 QUANTIZE_DOWN_PROJ="${QUANTIZE_DOWN_PROJ:-0}"
 RUN_BENCHMARK="${RUN_BENCHMARK:-0}"
 BENCHMARK_DATA_PATH="${BENCHMARK_DATA_PATH:-/home/reranker_experiment/data/latency_delay}"
@@ -90,9 +90,9 @@ if [[ "${CALIB_BACKEND}" != "pooling" && "${CALIB_BACKEND}" != "generate" ]]; th
   echo "[invalid] CALIB_BACKEND must be pooling or generate" >&2
   exit 2
 fi
-if [[ "${ANTI_METHOD}" != "m1" && "${ANTI_METHOD}" != "none" ]]; then
-  echo "[invalid] ANTI_METHOD must be m1 or none" >&2
-  echo "[invalid] m2 calls an incompatible ModelSlim path that expects Linear.module on Qwen3" >&2
+if [[ "${ANTI_METHOD}" != "none" ]]; then
+  echo "[invalid] ANTI_METHOD must be none for Qwen3 on this pinned ModelSlim/CANN stack" >&2
+  echo "[invalid] m1 and m2 both call compiled functions that expect Linear.module" >&2
   exit 2
 fi
 for flag in INSTALL_MODELSLIM REINSTALL_MODELSLIM QUANTIZE_DOWN_PROJ RUN_BENCHMARK ALLOW_MULTIPLE_INSTRUCTIONS PULL_IMAGE; do
