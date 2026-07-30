@@ -1395,7 +1395,7 @@ head as unquantized FP32. Do not use dynamic/per-token W8A8. Before loading the
 model, run the read-only preflight:
 
 The repository includes an end-to-end exporter for the production training
-JSONL. It clones and installs the vLLM-compatible ModelSlim branch into a
+JSONL. It clones and installs the vLLM-compatible ModelSlim ref/tag into a
 dedicated virtual environment, creates `inputs_pretokenized` calibration rows,
 truncates only the document so the Qwen3 answer-position suffix is retained,
 exports conservative static W8A8 weights, and validates the result. It never

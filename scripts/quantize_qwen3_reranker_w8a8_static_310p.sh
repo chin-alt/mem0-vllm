@@ -114,18 +114,35 @@ if [[ ! -d "${MODELSLIM_DIR}/.git" ]]; then
     https://gitee.com/ascend/msit.git "${MODELSLIM_DIR}"
 fi
 
-modelslim_ref="$(git -C "${MODELSLIM_DIR}" rev-parse --abbrev-ref HEAD)"
-if [[ "${modelslim_ref}" != "${MODELSLIM_BRANCH}" ]]; then
-  echo "[invalid] MODELSLIM_DIR is on ${modelslim_ref}, expected ${MODELSLIM_BRANCH}" >&2
+modelslim_commit="$(git -C "${MODELSLIM_DIR}" rev-parse HEAD)"
+expected_modelslim_commit=""
+for candidate_ref in \
+  "${MODELSLIM_BRANCH}^{commit}" \
+  "refs/tags/${MODELSLIM_BRANCH}^{commit}" \
+  "refs/heads/${MODELSLIM_BRANCH}^{commit}" \
+  "refs/remotes/origin/${MODELSLIM_BRANCH}^{commit}"; do
+  if expected_modelslim_commit="$(
+    git -C "${MODELSLIM_DIR}" rev-parse --verify "${candidate_ref}" 2>/dev/null
+  )"; then
+    break
+  fi
+  expected_modelslim_commit=""
+done
+if [[ -z "${expected_modelslim_commit}" ]]; then
+  echo "[invalid] MODELSLIM_DIR does not contain expected ref ${MODELSLIM_BRANCH}" >&2
   exit 4
 fi
-modelslim_commit="$(git -C "${MODELSLIM_DIR}" rev-parse HEAD)"
+if [[ "${modelslim_commit}" != "${expected_modelslim_commit}" ]]; then
+  echo "[invalid] MODELSLIM_DIR HEAD=${modelslim_commit}" >&2
+  echo "[invalid] expected ${MODELSLIM_BRANCH}=${expected_modelslim_commit}" >&2
+  exit 4
+fi
 modelslim_utils="${MODELSLIM_DIR}/msmodelslim/example/common/utils.py"
 if [[ ! -f "${modelslim_utils}" ]] || ! grep -q "inputs_pretokenized" "${modelslim_utils}"; then
   echo "[invalid] ModelSlim checkout does not have the expected inputs_pretokenized loader" >&2
   exit 4
 fi
-echo "[modelslim] branch=${modelslim_ref} commit=${modelslim_commit}"
+echo "[modelslim] ref=${MODELSLIM_BRANCH} commit=${modelslim_commit}"
 
 if [[ ! -x "${MODELSLIM_VENV}/bin/python" ]]; then
   if [[ "${INSTALL_MODELSLIM}" != "1" ]]; then
