@@ -31,6 +31,7 @@ Important environment overrides:
   CALIB_BACKEND            pooling or generate. Default: pooling
   PIP_INDEX_URL            Default: https://pypi.tuna.tsinghua.edu.cn/simple
   REINSTALL_MODELSLIM      Force reinstall inside the container venv. Default: 0
+  ANTI_METHOD              Anti-outlier method: m1 or none. Default: m1
   QUANTIZE_DOWN_PROJ       Quantize down_proj too. Default: 0
   PRODUCTION_INSTRUCTION   Optional instruction override.
   SHM_SIZE                 Docker shared-memory size. Default: 8g
@@ -62,6 +63,7 @@ HOST_MODELSLIM_CACHE="${HOST_MODELSLIM_CACHE:-/home/reranker_experiment/deps}"
 HOST_VENV_CACHE="${HOST_VENV_CACHE:-/home/reranker_experiment/venvs-container-v090}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 REINSTALL_MODELSLIM="${REINSTALL_MODELSLIM:-0}"
+ANTI_METHOD="${ANTI_METHOD:-m1}"
 QUANTIZE_DOWN_PROJ="${QUANTIZE_DOWN_PROJ:-0}"
 ALLOW_MULTIPLE_INSTRUCTIONS="${ALLOW_MULTIPLE_INSTRUCTIONS:-0}"
 PRODUCTION_INSTRUCTION="${PRODUCTION_INSTRUCTION:-}"
@@ -76,6 +78,10 @@ for flag in PULL_IMAGE REINSTALL_MODELSLIM QUANTIZE_DOWN_PROJ ALLOW_MULTIPLE_INS
 done
 if [[ "${CALIB_BACKEND}" != "pooling" && "${CALIB_BACKEND}" != "generate" ]]; then
   echo "[invalid] CALIB_BACKEND must be pooling or generate" >&2
+  exit 2
+fi
+if [[ "${ANTI_METHOD}" != "m1" && "${ANTI_METHOD}" != "none" ]]; then
+  echo "[invalid] ANTI_METHOD must be m1 or none" >&2
   exit 2
 fi
 if ! command -v docker >/dev/null 2>&1; then
@@ -148,6 +154,7 @@ docker_args=(
   -e "CALIB_BACKEND=${CALIB_BACKEND}"
   -e "PIP_INDEX_URL=${PIP_INDEX_URL}"
   -e "REINSTALL_MODELSLIM=${REINSTALL_MODELSLIM}"
+  -e "ANTI_METHOD=${ANTI_METHOD}"
   -e "QUANTIZE_DOWN_PROJ=${QUANTIZE_DOWN_PROJ}"
   -e "ALLOW_MULTIPLE_INSTRUCTIONS=${ALLOW_MULTIPLE_INSTRUCTIONS}"
   -e INSTALL_MODELSLIM=1

@@ -28,6 +28,10 @@ Important environment overrides:
   REINSTALL_MODELSLIM      Re-run ModelSlim installation. Default: 0
   PIP_INDEX_URL            Python package index used by install.sh and pip.
                            Default: https://pypi.tuna.tsinghua.edu.cn/simple
+  ANTI_METHOD              Anti-outlier method: m1 or none. Default: m1
+                           Use none to skip SmoothQuant while retaining static
+                           W8A8 calibration/export. m2 is incompatible with the
+                           plain Qwen3 Linear modules on this pinned stack.
   QUANTIZE_DOWN_PROJ       Also quantize down_proj instead of conservative FP fallback. Default: 0
   RUN_BENCHMARK            Run FP16 and W8A8 vLLM-Ascend A/B after export. Default: 0
   BENCHMARK_DATA_PATH      Business benchmark root used when RUN_BENCHMARK=1.
@@ -71,6 +75,7 @@ INSTALL_MODELSLIM="${INSTALL_MODELSLIM:-1}"
 REINSTALL_MODELSLIM="${REINSTALL_MODELSLIM:-0}"
 PYTHON_BOOTSTRAP="${PYTHON_BOOTSTRAP:-python3}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+ANTI_METHOD="${ANTI_METHOD:-m1}"
 QUANTIZE_DOWN_PROJ="${QUANTIZE_DOWN_PROJ:-0}"
 RUN_BENCHMARK="${RUN_BENCHMARK:-0}"
 BENCHMARK_DATA_PATH="${BENCHMARK_DATA_PATH:-/home/reranker_experiment/data/latency_delay}"
@@ -83,6 +88,11 @@ PULL_IMAGE="${PULL_IMAGE:-0}"
 
 if [[ "${CALIB_BACKEND}" != "pooling" && "${CALIB_BACKEND}" != "generate" ]]; then
   echo "[invalid] CALIB_BACKEND must be pooling or generate" >&2
+  exit 2
+fi
+if [[ "${ANTI_METHOD}" != "m1" && "${ANTI_METHOD}" != "none" ]]; then
+  echo "[invalid] ANTI_METHOD must be m1 or none" >&2
+  echo "[invalid] m2 calls an incompatible ModelSlim path that expects Linear.module on Qwen3" >&2
   exit 2
 fi
 for flag in INSTALL_MODELSLIM REINSTALL_MODELSLIM QUANTIZE_DOWN_PROJ RUN_BENCHMARK ALLOW_MULTIPLE_INSTRUCTIONS PULL_IMAGE; do
@@ -326,7 +336,6 @@ quant_args=(
   --a_bit 8
   --device_type cpu
   --act_method 1
-  --anti_method m2
   --disable_level L0
   --model_type qwen2.5
   --is_dynamic False
@@ -334,11 +343,14 @@ quant_args=(
   --use_fa_quant False
   --trust_remote_code True
 )
+if [[ "${ANTI_METHOD}" != "none" ]]; then
+  quant_args+=(--anti_method "${ANTI_METHOD}")
+fi
 if [[ "${QUANTIZE_DOWN_PROJ}" == "1" ]]; then
   quant_args+=(--disable_names lm_head)
 fi
 
-echo "[step 2/3] exporting static W8A8 weights (CPU calibration)"
+echo "[step 2/3] exporting static W8A8 weights (CPU calibration, anti_method=${ANTI_METHOD})"
 pushd "$(dirname "${quant_script}")" >/dev/null
 "${MODELSLIM_PYTHON}" "${REPO_ROOT}/scripts/run_modelslim_cpu.py" \
   "${quant_script}" "${quant_args[@]}"
@@ -353,6 +365,7 @@ popd >/dev/null
   "${MAX_LENGTH}" \
   "${CALIB_SAMPLES}" \
   "${CALIB_BACKEND}" \
+  "${ANTI_METHOD}" \
   "${QUANTIZE_DOWN_PROJ}" <<'PY'
 import json
 import sys
@@ -367,6 +380,7 @@ from pathlib import Path
     max_length,
     calib_samples,
     calib_backend,
+    anti_method,
     quantize_down_proj,
 ) = sys.argv[1:]
 manifest = {
@@ -379,6 +393,7 @@ manifest = {
     "max_length": int(max_length),
     "calibration_samples": int(calib_samples),
     "calibration_backend": calib_backend,
+    "anti_outlier_method": None if anti_method == "none" else anti_method,
     "quantize_down_proj": quantize_down_proj == "1",
     "lm_head_float": True,
     "kv_cache_quantization": False,
