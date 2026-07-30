@@ -7,6 +7,8 @@ Prepare calibration data and export experimental static W8A8 weights for the
 Qwen3-Reranker-0.6B / Ascend 310P vLLM-Ascend 0.10.2rc1 path.
 
 The host driver is never installed, upgraded, or modified by this script.
+PyTorch device-backend autoloading is disabled because this is a CPU-only
+export and torch_npu must not initialize the unmounted host driver.
 
 Important environment overrides:
   TRAIN_JSONL              Source reranker JSONL.
@@ -46,6 +48,10 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# PyTorch >=2.5 otherwise discovers the installed torch_npu entry point during
+# a plain `import torch`. This CPU workflow intentionally has no driver device
+# or libascend_hal mount, so backend initialization must stay disabled.
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 TRAIN_JSONL="${TRAIN_JSONL:-/home/reranker_experiment/data/split/train.jsonl}"
 FLOAT_MODEL_PATH="${FLOAT_MODEL_PATH:-/home/reranker_experiment/model/Qwen3-Reranker-0.6B}"
 QUANT_MODEL_PATH="${QUANT_MODEL_PATH:-/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8-static-safe}"

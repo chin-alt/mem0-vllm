@@ -1506,6 +1506,12 @@ object such as `anti_utils.cpython-310-aarch64-linux-gnu.so`, not as
 `anti_utils.py`. Both the host and container workflows select the extension
 matching the active Python interpreter before installing ModelSlim.
 
+The CPU container intentionally does not mount the host driver. Since PyTorch
+2.5 automatically discovers installed out-of-tree device backends during
+`import torch`, the workflow exports `TORCH_DEVICE_BACKEND_AUTOLOAD=0` to stop
+the image's `torch_npu` package from trying to load the unavailable
+`libascend_hal.so`. This does not disable any operation used by CPU calibration.
+
 ```bash
 python scripts/check_qwen3_reranker_w8a8_310p.py \
   --model-path /models/Qwen3-Reranker-0.6B-W8A8
