@@ -173,11 +173,30 @@ print("[modelslim] W8A8 imports are complete")
 PY
 }
 
+find_compatible_anti_utils() {
+  local overlay_root="$1"
+  local anti_dir="${overlay_root}/pytorch/llm_ptq/anti_outlier"
+  local extension_suffix
+  local candidate
+  while IFS= read -r extension_suffix; do
+    candidate="${anti_dir}/anti_utils${extension_suffix}"
+    if [[ -f "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done < <(
+    "${MODELSLIM_PYTHON}" -c \
+      'from importlib.machinery import EXTENSION_SUFFIXES; print("\n".join(EXTENSION_SUFFIXES))'
+  )
+  return 1
+}
+
 source_cann_for_modelslim_install() {
   local overlay_root="${ASCEND_HOME_PATH:-}/python/site-packages/msmodelslim"
-  local anti_utils="${overlay_root}/pytorch/llm_ptq/anti_outlier/anti_utils.py"
-  if [[ -f "${anti_utils}" ]]; then
-    echo "[modelslim] CANN overlay=${overlay_root}"
+  local anti_utils=""
+  anti_utils="$(find_compatible_anti_utils "${overlay_root}" || true)"
+  if [[ -n "${anti_utils}" ]]; then
+    echo "[modelslim] CANN overlay extension=${anti_utils}"
     return
   fi
 
@@ -211,15 +230,18 @@ source_cann_for_modelslim_install() {
   fi
 
   overlay_root="${ASCEND_HOME_PATH:-}/python/site-packages/msmodelslim"
-  anti_utils="${overlay_root}/pytorch/llm_ptq/anti_outlier/anti_utils.py"
-  if [[ ! -f "${anti_utils}" ]]; then
-    echo "[missing] ModelSlim CANN overlay: ${anti_utils}" >&2
+  anti_utils="$(find_compatible_anti_utils "${overlay_root}" || true)"
+  if [[ -z "${anti_utils}" ]]; then
+    echo "[missing] no Python-ABI-compatible anti_utils*.so under:" >&2
+    echo "[missing] ${overlay_root}/pytorch/llm_ptq/anti_outlier" >&2
     echo "[missing] ASCEND_HOME_PATH='${ASCEND_HOME_PATH:-<unset>}'" >&2
     echo "[missing] source the matching CANN toolkit environment, or set CANN_SET_ENV" >&2
     echo "[missing] this is an install-time package requirement; CPU calibration still does not use an NPU" >&2
+    find "${overlay_root}/pytorch/llm_ptq/anti_outlier" \
+      -maxdepth 1 -type f -name 'anti_utils*.so' -print 2>/dev/null || true
     exit 4
   fi
-  echo "[modelslim] CANN overlay=${overlay_root}"
+  echo "[modelslim] CANN overlay extension=${anti_utils}"
 }
 
 need_modelslim_install=0

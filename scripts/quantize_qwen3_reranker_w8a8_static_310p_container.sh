@@ -182,10 +182,15 @@ docker "${docker_args[@]}" "${IMAGE}" -lc '
   source "${cann_set_env}"
   set -u
   export CANN_SET_ENV="${cann_set_env}"
-  anti_utils="${ASCEND_HOME_PATH:-}/python/site-packages/msmodelslim/pytorch/llm_ptq/anti_outlier/anti_utils.py"
-  if [[ ! -f "${anti_utils}" ]]; then
-    echo "[missing] IMAGE does not contain the legacy ModelSlim overlay: ${anti_utils}" >&2
+  anti_dir="${ASCEND_HOME_PATH:-}/python/site-packages/msmodelslim/pytorch/llm_ptq/anti_outlier"
+  python_abi="$(python3 -c "import sys; print(\"cpython-%d%d\" % sys.version_info[:2])")"
+  anti_utils="$(find "${anti_dir}" -maxdepth 1 -type f \
+    -name "anti_utils.${python_abi}-*.so" -print -quit 2>/dev/null || true)"
+  if [[ -z "${anti_utils}" ]]; then
+    echo "[missing] IMAGE has no ${python_abi}-compatible anti_utils*.so under: ${anti_dir}" >&2
     echo "[missing] use an image with the full CANN 8.0/8.1 ModelSlim Python package" >&2
+    echo "[diagnostic] compiled anti_utils candidates in IMAGE:" >&2
+    find "${anti_dir}" -maxdepth 1 -type f -name "anti_utils*.so" -print 2>/dev/null || true
     exit 4
   fi
 

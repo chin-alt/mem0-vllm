@@ -1501,6 +1501,11 @@ If an earlier run printed `collect packages from CANN installation path:
 imports before accepting or stamping an installation. `torch_npu is not
 available` remains an expected warning during the CPU export path.
 
+The legacy CANN overlay supplies `anti_utils` as a CPython ABI-specific shared
+object such as `anti_utils.cpython-310-aarch64-linux-gnu.so`, not as
+`anti_utils.py`. Both the host and container workflows select the extension
+matching the active Python interpreter before installing ModelSlim.
+
 ```bash
 python scripts/check_qwen3_reranker_w8a8_310p.py \
   --model-path /models/Qwen3-Reranker-0.6B-W8A8
