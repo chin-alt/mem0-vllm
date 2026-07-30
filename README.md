@@ -1457,6 +1457,30 @@ PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 bash scripts/quantize_qwen3_reranker_w8a8_static_310p.sh
 ```
 
+If the host has no CANN toolkit, run the complete CPU export in the pinned
+legacy vLLM-Ascend image instead. The wrapper defaults to the NJU mirror
+`quay.nju.edu.cn/ascend/vllm-ascend:v0.9.0rc2`, verifies that the image really
+contains the old CANN ModelSlim overlay, and persists the result, calibration
+data, checkout, and image-specific venv through host mounts. It does not expose
+an NPU or modify the host driver:
+
+```bash
+cd /home/reranker_experiment/mem0-vllm
+bash scripts/quantize_qwen3_reranker_w8a8_static_310p_container.sh
+```
+
+The defaults match `/home/reranker_experiment/data/split/train.jsonl` and the
+merged model at
+`/home/reranker_experiment/model/qwen3_reranker_06b_lora_merged`. Override
+paths normally when needed:
+
+```bash
+TRAIN_JSONL=/data/train.jsonl \
+FLOAT_MODEL_PATH=/models/qwen3-reranker-merged \
+QUANT_MODEL_PATH=/models/qwen3-reranker-w8a8 \
+bash scripts/quantize_qwen3_reranker_w8a8_static_310p_container.sh
+```
+
 This pinned ModelSlim tag assembles part of its Python package from the CANN
 toolkit during `install.sh`. CPU calibration means model tensors stay on the
 CPU; it does not remove that install-time package dependency. The workflow
