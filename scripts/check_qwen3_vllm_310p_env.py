@@ -23,6 +23,7 @@ from scripts.check_qwen3_reranker_w8a8_310p import (
 EXPECTED_VLLM = "0.10.2"
 EXPECTED_VLLM_ASCEND = "0.10.2rc1"
 QWEN3_POOLING_ARCHITECTURE = "Qwen3ForSequenceClassification"
+QWEN3_BASE_ARCHITECTURE = "Qwen3ForCausalLM"
 
 
 def package_version(name: str) -> str:
@@ -41,6 +42,21 @@ def read_ascend_version(path: str, key: str) -> str:
     return match.group(1).strip() if match else "unknown"
 
 
+def qwen3_pooling_registry_supported(supported_architectures: set[str]) -> bool:
+    """Check the native or adapter-backed Qwen3 classification path.
+
+    vLLM 0.10.2 registers Qwen3ForCausalLM and normalizes the synthetic
+    Qwen3ForSequenceClassification override back to that base architecture
+    before applying its classification adapter. Newer vLLM releases may
+    register the sequence-classification architecture directly.
+    """
+
+    return bool(
+        {QWEN3_POOLING_ARCHITECTURE, QWEN3_BASE_ARCHITECTURE}
+        & supported_architectures
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check the 310P vLLM Qwen3 reranker runtime.")
     parser.add_argument("--model-path", required=True)
@@ -57,6 +73,7 @@ def main() -> None:
     from vllm import ModelRegistry
 
     quantized = (model_path / QUANT_DESCRIPTION_NAME).is_file()
+    supported_architectures = set(ModelRegistry.get_supported_archs())
     versions = {
         "python": platform.python_version(),
         "machine": platform.machine(),
@@ -67,8 +84,13 @@ def main() -> None:
         "npu_available": torch.npu.is_available(),
         "npu_count": torch.npu.device_count(),
         "qwen3_pooling_architecture": QWEN3_POOLING_ARCHITECTURE,
-        "qwen3_pooling_supported": QWEN3_POOLING_ARCHITECTURE
-        in ModelRegistry.get_supported_archs(),
+        "qwen3_pooling_directly_registered": QWEN3_POOLING_ARCHITECTURE
+        in supported_architectures,
+        "qwen3_base_architecture_registered": QWEN3_BASE_ARCHITECTURE
+        in supported_architectures,
+        "qwen3_pooling_supported": qwen3_pooling_registry_supported(
+            supported_architectures
+        ),
         "quantized_model": quantized,
         "host_driver": read_ascend_version(
             "/usr/local/Ascend/driver/version.info", "Version"
@@ -92,7 +114,9 @@ def main() -> None:
         failures.append("torch reports that the NPU is unavailable")
     if not versions["qwen3_pooling_supported"]:
         failures.append(
-            f"vLLM registry does not contain {QWEN3_POOLING_ARCHITECTURE}"
+            "vLLM registry contains neither the direct pooling architecture "
+            f"{QWEN3_POOLING_ARCHITECTURE} nor its adapter base "
+            f"{QWEN3_BASE_ARCHITECTURE}"
         )
     if not str(versions["host_driver"]).lower().startswith("24.1.rc2"):
         failures.append(
