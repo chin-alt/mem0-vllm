@@ -1533,6 +1533,13 @@ QUANT_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8-static
 bash scripts/quantize_qwen3_reranker_w8a8_static_310p_container.sh
 ```
 
+Qwen3 normally ties `lm_head.weight` and `model.embed_tokens.weight` to the
+same storage. The legacy ModelSlim saver sends both keys to the low-level
+`safetensors.torch.save_file` dictionary API, which rejects shared storage
+after calibration. The CPU launcher clones only the aliased `lm_head` tensor
+in the temporary serialization dictionary. It does not alter the live model or
+its values, and both required keys remain present in the exported file.
+
 ```bash
 python scripts/check_qwen3_reranker_w8a8_310p.py \
   --model-path /models/Qwen3-Reranker-0.6B-W8A8
