@@ -20,6 +20,8 @@ Important environment overrides:
   PRODUCTION_INSTRUCTION   Optional instruction override for every calibration row.
   MODELSLIM_DIR            Pinned msit checkout directory.
   MODELSLIM_VENV           Dedicated Python venv directory.
+  CANN_SET_ENV             Optional CANN set_env.sh path. The script otherwise
+                           checks the standard /usr/local/Ascend locations.
   INSTALL_MODELSLIM        Clone/install the pinned ModelSlim branch if needed. Default: 1
   REINSTALL_MODELSLIM      Re-run ModelSlim installation. Default: 0
   PIP_INDEX_URL            Python package index used by install.sh and pip.
@@ -58,6 +60,7 @@ ALLOW_MULTIPLE_INSTRUCTIONS="${ALLOW_MULTIPLE_INSTRUCTIONS:-0}"
 MODELSLIM_BRANCH="${MODELSLIM_BRANCH:-modelslim-VLLM-8.1.RC1.b020_001}"
 MODELSLIM_DIR="${MODELSLIM_DIR:-/home/reranker_experiment/deps/msit-modelslim-vllm-8.1}"
 MODELSLIM_VENV="${MODELSLIM_VENV:-/home/reranker_experiment/venvs/modelslim-vllm-8.1}"
+CANN_SET_ENV="${CANN_SET_ENV:-}"
 INSTALL_MODELSLIM="${INSTALL_MODELSLIM:-1}"
 REINSTALL_MODELSLIM="${REINSTALL_MODELSLIM:-0}"
 PYTHON_BOOTSTRAP="${PYTHON_BOOTSTRAP:-python3}"
@@ -158,9 +161,78 @@ fi
 
 MODELSLIM_PYTHON="${MODELSLIM_VENV}/bin/python"
 install_stamp="${MODELSLIM_VENV}/.memranker_${MODELSLIM_BRANCH}_installed"
+
+check_modelslim_imports() {
+  "${MODELSLIM_PYTHON}" - <<'PY'
+import transformers
+from msmodelslim.pytorch.llm_ptq.anti_outlier import AntiOutlier, AntiOutlierConfig
+from msmodelslim.pytorch.llm_ptq.llm_ptq_tools import Calibrator, QuantConfig
+
+print("[modelslim] transformers=" + transformers.__version__)
+print("[modelslim] W8A8 imports are complete")
+PY
+}
+
+source_cann_for_modelslim_install() {
+  local overlay_root="${ASCEND_HOME_PATH:-}/python/site-packages/msmodelslim"
+  local anti_utils="${overlay_root}/pytorch/llm_ptq/anti_outlier/anti_utils.py"
+  if [[ -f "${anti_utils}" ]]; then
+    echo "[modelslim] CANN overlay=${overlay_root}"
+    return
+  fi
+
+  local selected_set_env=""
+  if [[ -n "${CANN_SET_ENV}" ]]; then
+    if [[ ! -f "${CANN_SET_ENV}" ]]; then
+      echo "[missing] CANN_SET_ENV does not exist: ${CANN_SET_ENV}" >&2
+      exit 4
+    fi
+    selected_set_env="${CANN_SET_ENV}"
+  else
+    local candidate
+    for candidate in \
+      /usr/local/Ascend/ascend-toolkit/set_env.sh \
+      /usr/local/Ascend/ascend-toolkit/latest/set_env.sh \
+      /usr/local/Ascend/latest/set_env.sh; do
+      if [[ -f "${candidate}" ]]; then
+        selected_set_env="${candidate}"
+        break
+      fi
+    done
+  fi
+
+  if [[ -n "${selected_set_env}" ]]; then
+    echo "[modelslim] sourcing CANN environment: ${selected_set_env}"
+    # Some CANN set_env.sh releases read optional variables without defaults.
+    set +u
+    # shellcheck disable=SC1090
+    source "${selected_set_env}"
+    set -u
+  fi
+
+  overlay_root="${ASCEND_HOME_PATH:-}/python/site-packages/msmodelslim"
+  anti_utils="${overlay_root}/pytorch/llm_ptq/anti_outlier/anti_utils.py"
+  if [[ ! -f "${anti_utils}" ]]; then
+    echo "[missing] ModelSlim CANN overlay: ${anti_utils}" >&2
+    echo "[missing] ASCEND_HOME_PATH='${ASCEND_HOME_PATH:-<unset>}'" >&2
+    echo "[missing] source the matching CANN toolkit environment, or set CANN_SET_ENV" >&2
+    echo "[missing] this is an install-time package requirement; CPU calibration still does not use an NPU" >&2
+    exit 4
+  fi
+  echo "[modelslim] CANN overlay=${overlay_root}"
+}
+
+need_modelslim_install=0
 if [[ "${REINSTALL_MODELSLIM}" == "1" || ! -f "${install_stamp}" ]]; then
+  need_modelslim_install=1
+elif ! check_modelslim_imports; then
+  echo "[modelslim] existing install is incomplete; forcing reinstall" >&2
+  need_modelslim_install=1
+fi
+
+if [[ "${need_modelslim_install}" == "1" ]]; then
   if [[ "${INSTALL_MODELSLIM}" != "1" ]]; then
-    echo "[missing] ModelSlim install stamp: ${install_stamp}" >&2
+    echo "[missing] ModelSlim is absent or incomplete and INSTALL_MODELSLIM=0" >&2
     exit 4
   fi
   # Activation makes install.sh use this dedicated environment while retaining
@@ -170,13 +242,18 @@ if [[ "${REINSTALL_MODELSLIM}" == "1" || ! -f "${install_stamp}" ]]; then
   source "${MODELSLIM_VENV}/bin/activate"
   export PIP_INDEX_URL
   echo "[modelslim] pip_index_url=${PIP_INDEX_URL}"
+  source_cann_for_modelslim_install
   pushd "${MODELSLIM_DIR}/msmodelslim" >/dev/null
   bash install.sh
   popd >/dev/null
   "${MODELSLIM_PYTHON}" -m pip install \
     --index-url "${PIP_INDEX_URL}" \
     transformers==4.55.2 tokenizers==0.21.4 accelerate safetensors
-  "${MODELSLIM_PYTHON}" -c 'import msmodelslim, transformers; print("[modelslim] transformers=" + transformers.__version__)'
+  if ! check_modelslim_imports; then
+    echo "[invalid] ModelSlim installed without the W8A8 anti-outlier/PTQ modules" >&2
+    echo "[invalid] verify that CANN_SET_ENV points to the CANN toolkit matching this ModelSlim tag" >&2
+    exit 4
+  fi
   printf '%s\n' "${MODELSLIM_BRANCH}" > "${install_stamp}"
 fi
 

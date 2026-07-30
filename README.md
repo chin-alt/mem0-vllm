@@ -1457,6 +1457,26 @@ PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 bash scripts/quantize_qwen3_reranker_w8a8_static_310p.sh
 ```
 
+This pinned ModelSlim tag assembles part of its Python package from the CANN
+toolkit during `install.sh`. CPU calibration means model tensors stay on the
+CPU; it does not remove that install-time package dependency. The workflow
+automatically sources `/usr/local/Ascend/ascend-toolkit/set_env.sh` (including
+the common `latest` variant) when `ASCEND_HOME_PATH` is not ready. For a custom
+CANN installation, pass its environment script explicitly:
+
+```bash
+CANN_SET_ENV=/opt/Ascend/ascend-toolkit/set_env.sh \
+REINSTALL_MODELSLIM=1 \
+bash scripts/quantize_qwen3_reranker_w8a8_static_310p.sh
+```
+
+If an earlier run printed `collect packages from CANN installation path:
+/python/site-packages/msmodelslim/`, it installed an incomplete wheel because
+`ASCEND_HOME_PATH` was empty. Pull this fix and rerun with
+`REINSTALL_MODELSLIM=1`; the workflow now checks the exact anti-outlier and PTQ
+imports before accepting or stamping an installation. `torch_npu is not
+available` remains an expected warning during the CPU export path.
+
 ```bash
 python scripts/check_qwen3_reranker_w8a8_310p.py \
   --model-path /models/Qwen3-Reranker-0.6B-W8A8
