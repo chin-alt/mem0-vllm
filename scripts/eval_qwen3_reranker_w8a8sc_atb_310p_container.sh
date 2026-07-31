@@ -24,6 +24,7 @@ Overrides:
   EXPECTED_FBETA_BETA      Default: 0.3
   TOP_K_LIST               Default: "1 3 5 10"
   SORT_BY_LENGTH           0 or 1. Default: 1
+  PROGRESS_EVERY           Print every N ATB batches. Default: 100
   SAVE_DOC_TEXT            0 or 1. Default: 0
   IMAGE                    MindIE 2.1.RC1 300I-Duo image.
   PULL_IMAGE               0 or 1. Default: 0
@@ -62,6 +63,7 @@ SHM_SIZE="${SHM_SIZE:-16g}"
 EXPECTED_FBETA_BETA="${EXPECTED_FBETA_BETA:-0.3}"
 TOP_K_LIST="${TOP_K_LIST:-1 3 5 10}"
 SORT_BY_LENGTH="${SORT_BY_LENGTH:-1}"
+PROGRESS_EVERY="${PROGRESS_EVERY:-100}"
 SAVE_DOC_TEXT="${SAVE_DOC_TEXT:-0}"
 INSTRUCTION="${INSTRUCTION:-}"
 
@@ -97,7 +99,7 @@ for toggle in PULL_IMAGE SORT_BY_LENGTH SAVE_DOC_TEXT; do
     exit 2
   fi
 done
-for number in TP_SIZE MAX_LENGTH BATCH_SIZE MASTER_PORT; do
+for number in TP_SIZE MAX_LENGTH BATCH_SIZE MASTER_PORT PROGRESS_EVERY; do
   value="${!number}"
   if [[ ! "${value}" =~ ^[0-9]+$ ]] || (( value < 1 )); then
     echo "[invalid] ${number} must be a positive integer; got ${value}" >&2
@@ -225,6 +227,7 @@ docker run --rm \
   -e "BATCH_SIZE=${BATCH_SIZE}" \
   -e "ATB_EVAL_BATCH_SIZE=${BATCH_SIZE}" \
   -e "ATB_EVAL_SORT_BY_LENGTH=${SORT_BY_LENGTH}" \
+  -e "ATB_EVAL_PROGRESS_EVERY=${PROGRESS_EVERY}" \
   -e "MASTER_PORT=${MASTER_PORT}" \
   -e "EXPECTED_FBETA_BETA=${EXPECTED_FBETA_BETA}" \
   -e "TOP_K_LIST=${TOP_K_LIST}" \

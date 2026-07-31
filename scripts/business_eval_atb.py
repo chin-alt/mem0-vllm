@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import atexit
+import math
 import os
 import shutil
 import sys
 import tempfile
+import time
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,12 +23,24 @@ for import_path in (PROJECT_ROOT, SRC_DIR):
         sys.path.insert(0, str(import_path))
 
 import evaluate_business  # noqa: E402
-from modeling import (  # noqa: E402
-    RERANKER_PREFIX,
-    RERANKER_SUFFIX,
-    resolve_yes_no_token_ids,
+from modeling import resolve_yes_no_token_ids  # noqa: E402
+from scripts.prepare_qwen3_reranker_calibration import (  # noqa: E402
+    truncate_prompt_document,
 )
 from scripts.run_atb_sharded_model import prepare_flat_model  # noqa: E402
+
+
+INPUT_PREFIX = "<Instruct>: "
+QUERY_SEPARATOR = "\n<Query>: "
+DOCUMENT_SEPARATOR = "\n<Document>: "
+
+
+@dataclass(frozen=True)
+class AtbPrompt:
+    prompt: str
+    token_length: int
+    original_token_length: int
+    truncated: bool
 
 
 def yes_no_probabilities(
@@ -96,21 +111,58 @@ def format_atb_prompts(
     tokenizer: Any,
     input_texts: list[str],
     max_length: int,
-) -> list[tuple[str, int]]:
-    prefix_ids = list(tokenizer.encode(RERANKER_PREFIX, add_special_tokens=False))
-    suffix_ids = list(tokenizer.encode(RERANKER_SUFFIX, add_special_tokens=False))
-    pair_max_length = max(1, max_length - len(prefix_ids) - len(suffix_ids))
-    prompts: list[tuple[str, int]] = []
+) -> list[AtbPrompt]:
+    """Rebuild the exact generate prompt used for calibration and vLLM.
+
+    ``evaluate_business`` passes the scorer its historical single-newline
+    intermediate format.  ATB must not wrap that string directly: W8A8SC was
+    calibrated with the official Qwen3 generate prompt, which uses double
+    newlines, and only the document may be truncated so the answer suffix is
+    always retained.
+    """
+    prompts: list[AtbPrompt] = []
     for text in input_texts:
-        pair_ids = list(tokenizer.encode(text.strip(), add_special_tokens=False))
-        prompt_ids = prefix_ids + pair_ids[:pair_max_length] + suffix_ids
-        prompt = tokenizer.decode(
-            prompt_ids,
-            skip_special_tokens=False,
-            clean_up_tokenization_spaces=False,
+        instruction, query, document = parse_business_input(text)
+        prompt, token_length, original_length, truncated = truncate_prompt_document(
+            tokenizer=tokenizer,
+            instruction=instruction,
+            query=query,
+            document=document,
+            backend="generate",
+            max_length=max_length,
         )
-        prompts.append((prompt, len(prompt_ids)))
+        prompts.append(
+            AtbPrompt(
+                prompt=prompt,
+                token_length=token_length,
+                original_token_length=original_length,
+                truncated=truncated,
+            )
+        )
     return prompts
+
+
+def parse_business_input(text: str) -> tuple[str, str, str]:
+    text = text.strip()
+    if not text.startswith(INPUT_PREFIX):
+        raise ValueError("business scorer input is missing '<Instruct>: '")
+    instruction, query_marker, remainder = text[len(INPUT_PREFIX) :].partition(
+        QUERY_SEPARATOR
+    )
+    if not query_marker:
+        raise ValueError("business scorer input is missing '\\n<Query>: '")
+    query, document_marker, document = remainder.partition(DOCUMENT_SEPARATOR)
+    if not document_marker:
+        raise ValueError("business scorer input is missing '\\n<Document>: '")
+    return instruction.strip(), query.strip(), document.strip()
+
+
+def percentile(values: list[int], quantile: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, math.ceil(quantile * len(ordered)) - 1))
+    return ordered[index]
 
 
 class AtbCausalLMScorer:
@@ -139,6 +191,10 @@ class AtbCausalLMScorer:
         )
         self.sort_by_length = (
             os.environ.get("ATB_EVAL_SORT_BY_LENGTH", "1") == "1"
+        )
+        self.progress_every = max(
+            1,
+            int(os.environ.get("ATB_EVAL_PROGRESS_EVERY", "100")),
         )
         runtime_model, temporary_model = prepare_flat_model(
             Path(model_path),
@@ -248,27 +304,59 @@ class AtbCausalLMScorer:
                 "ATB scorer batch size must match container configuration: "
                 f"{batch_size} != {self.configured_batch_size}"
             )
-        indexed = list(enumerate(format_atb_prompts(
+        formatted_prompts = format_atb_prompts(
             self.tokenizer,
             input_texts,
             self.max_length,
-        )))
+        )
+        token_lengths = [item.token_length for item in formatted_prompts]
+        original_lengths = [item.original_token_length for item in formatted_prompts]
+        truncated_count = sum(item.truncated for item in formatted_prompts)
+        self.evaluation_metadata.update(
+            {
+                "prompt_format": "qwen3_generate_calibration_parity",
+                "prompt_token_p50": percentile(token_lengths, 0.50),
+                "prompt_token_p90": percentile(token_lengths, 0.90),
+                "prompt_token_max": max(token_lengths, default=0),
+                "original_prompt_token_p50": percentile(original_lengths, 0.50),
+                "original_prompt_token_p90": percentile(original_lengths, 0.90),
+                "original_prompt_token_max": max(original_lengths, default=0),
+                "num_truncated_pairs": truncated_count,
+                "truncated_pair_ratio": (
+                    truncated_count / len(formatted_prompts)
+                    if formatted_prompts
+                    else 0.0
+                ),
+            }
+        )
+
+        indexed = list(enumerate(formatted_prompts))
         if self.sort_by_length:
-            indexed.sort(key=lambda item: item[1][1])
+            indexed.sort(key=lambda item: item[1].token_length)
 
         scores: list[float | None] = [None] * len(indexed)
+        predict_started = time.perf_counter()
+        total_atb_seconds = 0.0
+        num_batches = 0
         for start in range(0, len(indexed), batch_size):
             batch = indexed[start : start + batch_size]
             batch_scores, atb_seconds = self._score_batch(
-                [item[1][0] for item in batch]
+                [item[1].prompt for item in batch]
             )
+            total_atb_seconds += atb_seconds
+            num_batches += 1
             for (original_index, _prompt), score in zip(batch, batch_scores):
                 scores[original_index] = score
-            if self.rank == 0:
+            scored = min(start + len(batch), len(indexed))
+            if self.rank == 0 and (
+                num_batches == 1
+                or num_batches % self.progress_every == 0
+                or scored == len(indexed)
+            ):
                 print(
                     "[atb-eval] scored=%d/%d batch=%d atb=%.4fs"
                     % (
-                        min(start + len(batch), len(indexed)),
+                        scored,
                         len(indexed),
                         len(batch),
                         atb_seconds,
@@ -277,6 +365,27 @@ class AtbCausalLMScorer:
                 )
         if any(score is None for score in scores):
             raise RuntimeError("ATB scoring left one or more inputs without a score")
+        predict_seconds = time.perf_counter() - predict_started
+        example_count = len(indexed)
+        self.evaluation_metadata.update(
+            {
+                "num_atb_batches": num_batches,
+                "atb_infer_time_seconds": total_atb_seconds,
+                "atb_seconds_per_example": (
+                    total_atb_seconds / example_count if example_count else 0.0
+                ),
+                "atb_examples_per_second": (
+                    example_count / total_atb_seconds
+                    if total_atb_seconds > 0
+                    else 0.0
+                ),
+                "atb_adapter_time_seconds": predict_seconds,
+                "atb_adapter_overhead_seconds": max(
+                    0.0,
+                    predict_seconds - total_atb_seconds,
+                ),
+            }
+        )
         return [float(score) for score in scores if score is not None]
 
 

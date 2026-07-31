@@ -6,18 +6,18 @@ import torch
 from scripts.business_eval_atb import (
     YesNoLogitCapture,
     format_atb_prompts,
+    parse_business_input,
 )
-from modeling import RERANKER_PREFIX, RERANKER_SUFFIX
+from scripts.prepare_qwen3_reranker_calibration import (
+    QWEN3_RERANKER_SUFFIX,
+    format_prompt,
+)
 
 
 class FakeTokenizer:
-    def encode(self, text, add_special_tokens=False):
+    def encode(self, text, add_special_tokens=True):
         del add_special_tokens
-        if text == RERANKER_PREFIX:
-            return [10, 11]
-        if text == RERANKER_SUFFIX:
-            return [20, 21]
-        return [1, 2, 3, 4]
+        return [ord(character) for character in text]
 
     def decode(
         self,
@@ -26,17 +26,46 @@ class FakeTokenizer:
         clean_up_tokenization_spaces=False,
     ):
         del skip_special_tokens, clean_up_tokenization_spaces
-        return ",".join(str(token_id) for token_id in token_ids)
+        return "".join(chr(token_id) for token_id in token_ids)
 
 
 class AtbBusinessEvaluationTests(unittest.TestCase):
     def test_formats_existing_business_input_for_atb(self):
+        expected = format_prompt(
+            "instruction",
+            "query",
+            "document",
+            backend="generate",
+        )
         prompts = format_atb_prompts(
             FakeTokenizer(),
-            ["business input"],
-            max_length=7,
+            ["<Instruct>: instruction\n<Query>: query\n<Document>: document"],
+            max_length=len(expected),
         )
-        self.assertEqual(prompts, [("10,11,1,2,3,20,21", 7)])
+        self.assertEqual(prompts[0].prompt, expected)
+        self.assertEqual(prompts[0].token_length, len(expected))
+        self.assertFalse(prompts[0].truncated)
+
+    def test_truncates_only_document_and_preserves_generate_suffix(self):
+        prompts = format_atb_prompts(
+            FakeTokenizer(),
+            [
+                "<Instruct>: instruction\n<Query>: query\n<Document>: "
+                + "d" * 1000
+            ],
+            max_length=512,
+        )
+        self.assertEqual(prompts[0].token_length, 512)
+        self.assertTrue(prompts[0].truncated)
+        self.assertTrue(prompts[0].prompt.endswith(QWEN3_RERANKER_SUFFIX))
+
+    def test_parses_multiline_instruction(self):
+        self.assertEqual(
+            parse_business_input(
+                "<Instruct>: first\nsecond\n<Query>: q\n<Document>: d"
+            ),
+            ("first\nsecond", "q", "d"),
+        )
 
     def test_capture_uses_normalized_yes_no_logits(self):
         logits = torch.zeros((2, 12), dtype=torch.float32)
