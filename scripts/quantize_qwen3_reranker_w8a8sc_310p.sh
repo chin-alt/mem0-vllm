@@ -330,12 +330,34 @@ quant_args=(
   --use_fa_quant False
   --trust_remote_code True
 )
+
+patch_atb_quantize_config() {
+  local model_path="$1"
+  local quantize="$2"
+  "${MODELSLIM_PYTHON}" - "${model_path}/config.json" "${quantize}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+quantize = sys.argv[2]
+config = json.loads(path.read_text(encoding="utf-8"))
+config["quantize"] = quantize
+config["torch_dtype"] = "float16"
+if "dtype" in config:
+    config["dtype"] = "float16"
+path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(f"[model] ATB config quantize={quantize} torch_dtype=float16: {path}")
+PY
+}
+
 echo "[step 2/5] exporting complete-body W8A8S on NPU"
 echo "[modelslim] w_bit=4 a_bit=8 co_sparse=True is_lowbit=True fraction=${FRACTION}"
 pushd "$(dirname "${quant_script}")" >/dev/null
 "${MODELSLIM_PYTHON}" "${REPO_ROOT}/scripts/run_modelslim_npu.py" \
   "${quant_script}" "${quant_args[@]}"
 popd >/dev/null
+patch_atb_quantize_config "${W8A8S_MODEL_PATH}" "w8a8s"
 
 echo "[step 3/5] validating W8A8S coverage before compression"
 "${MODELSLIM_PYTHON}" "${REPO_ROOT}/scripts/check_qwen3_reranker_w8a8sc_310p.py" \
@@ -361,6 +383,7 @@ pushd "${ATB_SPEED_HOME_PATH}" >/dev/null
   -m examples.convert.model_slim.sparse_compressor \
   "${compress_args[@]}"
 popd >/dev/null
+patch_atb_quantize_config "${W8A8SC_MODEL_PATH}" "w8a8sc"
 
 echo "[step 5/5] validating final W8A8SC model"
 "${MODELSLIM_PYTHON}" "${REPO_ROOT}/scripts/check_qwen3_reranker_w8a8sc_310p.py" \
