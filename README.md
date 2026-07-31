@@ -1390,6 +1390,60 @@ The sweep also writes `benchmark_summary.json`.
 
 #### 310P W8A8SC + pure ATB path
 
+The repository also contains an experimental path that restores the vLLM
+scheduler for W8A8SC. This is deliberately separate from the stable
+`v0.10.0rc1-310p` launcher:
+
+- `vllm==0.10.0` / `vllm-ascend==0.10.0rc1` / CANN 8.2 is the stack used by
+  the fixed HDK 24.1.RC2.x host, but it has no 310P W8A8SC loader.
+- The implementation first appears in the `v0.16.0rc1` release line. The first
+  stable release that contains it is `vllm-ascend==0.18.0`, paired with
+  `vllm==0.18.0` and torch/torch-npu 2.9. The general v0.18 dependency is CANN
+  8.5.1, but the official 310P high-performance guide explicitly requires the
+  newer CANN 9.0.0/PTA path.
+- ATB `partN-of-M` W8A8SC files are not vLLM `sharded_state` files. The input
+  W8A8S model must be loaded and compressed again with the official
+  `examples/save_sharded_state_310.py` script. Never point vLLM at the working
+  ATB output and assume that `--quantization ascend` converts it at load time.
+
+First check the exact versions and whether the newer container can still use
+the fixed host driver. This does not modify the driver or any model:
+
+```bash
+VERSION_ONLY=1 \
+PULL_IMAGE=1 \
+bash scripts/run_qwen3_reranker_w8a8sc_vllm_310p_container.sh
+```
+
+The probe prints the actual Python, torch, torch-npu, vLLM, vLLM-Ascend, CANN,
+and mounted host-driver versions, imports the official W8A8SC loader, checks
+for `npu_matmul_compress_dequant`, and executes a small NPU tensor operation.
+Only continue if that command passes. A driver/runtime failure here is a hard
+compatibility boundary, not a model or evaluator error.
+
+After a successful probe, create a new vLLM-specific checkpoint and evaluate
+it with the existing vLLM business path:
+
+```bash
+HOST_W8A8S_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8S-v1 \
+HOST_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8SC-vllm-v1 \
+HOST_DATA_PATH=/home/reranker_experiment/data/latency_delay \
+HOST_OUTPUT_PATH=/home/reranker_experiment/output/qwen3_w8a8sc_vllm_0625 \
+TRAIN_JSONL=/home/reranker_experiment/data/split/train.jsonl \
+DATASET=0625caption \
+MAX_LENGTH=1024 \
+BATCH_SIZE=4 \
+CONVERT_MODEL=1 \
+RUN_EVAL=1 \
+PULL_IMAGE=0 \
+bash scripts/run_qwen3_reranker_w8a8sc_vllm_310p_container.sh
+```
+
+The vLLM evaluator now forwards `VLLM_LOAD_FORMAT=sharded_state` in addition
+to `VLLM_QUANTIZATION=ascend`. The launcher prepares ModelSlim from commit
+`6a860e4a7b48b4573a8aeeaa12123d2bbc9ec9b8`, the version recorded by the
+official Qwen3 310P W8A8SC model card, and caches its environment on the host.
+
 The preferred 310P INT8 experiment is now the hardware-specific sparse
 compressed path rather than dense static W8A8 under vLLM eager mode:
 

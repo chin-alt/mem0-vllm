@@ -221,6 +221,14 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("VLLM_QUANTIZATION", ""),
         help="Optional vLLM quantization name, for example ascend for W8A8 Ascend weights.",
     )
+    parser.add_argument(
+        "--load_format",
+        default=os.environ.get("VLLM_LOAD_FORMAT", ""),
+        help=(
+            "Optional vLLM load format. W8A8SC checkpoints produced by "
+            "vLLM-Ascend save_sharded_state_310.py require sharded_state."
+        ),
+    )
     parser.add_argument("--enable_prefix_caching", action="store_true", default=True)
     parser.add_argument("--no_enable_prefix_caching", dest="enable_prefix_caching", action="store_false")
     parser.add_argument("--sort_by_length", action="store_true", default=True)
@@ -544,6 +552,8 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
         llm_kwargs["distributed_executor_backend"] = args.distributed_executor_backend
     if getattr(args, "quantization", ""):
         llm_kwargs["quantization"] = args.quantization
+    if getattr(args, "load_format", ""):
+        llm_kwargs["load_format"] = args.load_format
     if scoring_backend == "pooling":
         llm_kwargs.update(pooling_api_kwargs(LLM))
         llm_kwargs["hf_overrides"] = pooling_hf_overrides(model_family)
@@ -983,6 +993,7 @@ def main() -> None:
             "compilation_config": args.compilation_config,
             "distributed_executor_backend": args.distributed_executor_backend,
             "quantization": args.quantization,
+            "load_format": args.load_format,
             "sort_by_length": args.sort_by_length,
             "sort_descending": args.sort_descending,
             "local_files_only": args.local_files_only,

@@ -31,6 +31,7 @@ Environment overrides:
   VLLM_ADDITIONAL_CONFIG         Optional JSON object for LLM(..., additional_config=...).
   VLLM_COMPILATION_CONFIG        Optional JSON object for LLM(..., compilation_config=...).
   VLLM_QUANTIZATION              Optional quantization name, e.g. ascend for W8A8 weights.
+  VLLM_LOAD_FORMAT               Optional load format, e.g. sharded_state for W8A8SC.
   LOCAL_FILES_ONLY               Force offline local model loading. Default: 1
   SKIP_EXISTING                  Skip a run if metrics.json already exists. Default: 1
   CONTINUE_ON_ERROR              Continue remaining runs after one failure. Default: 1
@@ -225,6 +226,9 @@ if [[ -n "${VLLM_DISTRIBUTED_EXECUTOR_BACKEND:-}" ]]; then
 fi
 if [[ -n "${VLLM_QUANTIZATION:-}" ]]; then
   optional_vllm_args+=(--quantization "${VLLM_QUANTIZATION}")
+fi
+if [[ -n "${VLLM_LOAD_FORMAT:-}" ]]; then
+  optional_vllm_args+=(--load_format "${VLLM_LOAD_FORMAT}")
 fi
 
 find_gt_file() {
