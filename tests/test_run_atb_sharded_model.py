@@ -17,7 +17,25 @@ def copy_entry(source: Path, destination: Path) -> None:
 
 
 class AtbShardedModelRunnerTests(unittest.TestCase):
-    def test_main_overlays_and_forwards_w8a8sc_quantize_mode(self):
+    def test_detects_declared_run_pa_quantize_argument(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_pa_path = Path(directory) / "run_pa.py"
+            run_pa_path.write_text(
+                'parser.add_argument("--quantize", type=str, default=None)\n',
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                run_atb_sharded_model.run_pa_supports_argument(
+                    "--quantize", run_pa_path
+                )
+            )
+            self.assertFalse(
+                run_atb_sharded_model.run_pa_supports_argument(
+                    "--unsupported", run_pa_path
+                )
+            )
+
+    def test_main_uses_config_when_run_pa_has_no_quantize_argument(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "model"
             part = root / "part0-of-1"
@@ -70,6 +88,11 @@ class AtbShardedModelRunnerTests(unittest.TestCase):
                     "symlink_entry",
                     side_effect=copy_entry,
                 ),
+                mock.patch.object(
+                    run_atb_sharded_model,
+                    "run_pa_supports_argument",
+                    return_value=False,
+                ),
                 mock.patch.object(run_atb_sharded_model.atexit, "register"),
                 mock.patch.object(
                     run_atb_sharded_model.runpy,
@@ -82,8 +105,7 @@ class AtbShardedModelRunnerTests(unittest.TestCase):
             self.assertEqual(observed["module_name"], "examples.run_pa")
             self.assertEqual(observed["run_name"], "__main__")
             self.assertIn("--input_texts", observed["argv"])
-            quantize_index = observed["argv"].index("--quantize")
-            self.assertEqual(observed["argv"][quantize_index + 1], "w8a8sc")
+            self.assertNotIn("--quantize", observed["argv"])
             self.assertTrue(observed["has_weights"])
             self.assertEqual(observed["config"]["quantize"], "w8a8sc")
             self.assertEqual(observed["config"]["torch_dtype"], "float16")

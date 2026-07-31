@@ -48,6 +48,21 @@ def symlink_entry(source: Path, destination: Path) -> None:
     destination.symlink_to(source, target_is_directory=source.is_dir())
 
 
+def run_pa_supports_argument(
+    argument: str,
+    run_pa_path: Path | None = None,
+) -> bool:
+    if run_pa_path is None:
+        run_pa_path = Path.cwd() / "examples" / "run_pa.py"
+    if not run_pa_path.is_file():
+        return False
+    source = run_pa_path.read_text(encoding="utf-8")
+    pattern = re.compile(
+        r"add_argument\(\s*[\"']" + re.escape(argument) + r"[\"']"
+    )
+    return pattern.search(source) is not None
+
+
 def prepare_flat_model(
     model_root: Path,
     local_rank: int,
@@ -147,12 +162,21 @@ def main() -> None:
         flush=True,
     )
 
+    quantize_args = []
+    quantize_transport = "config"
+    if args.quantize and run_pa_supports_argument("--quantize"):
+        quantize_args = ["--quantize", args.quantize]
+        quantize_transport = "config+cli"
+    print(
+        f"[atb-shard] quantize={args.quantize} transport={quantize_transport}",
+        flush=True,
+    )
+
     sys.argv = [
         "examples.run_pa",
         "--model_path",
         str(runtime_model),
-        "--quantize",
-        args.quantize,
+        *quantize_args,
         *run_pa_args,
     ]
     # torch.distributed.run launches this file by absolute path, making the

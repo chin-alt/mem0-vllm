@@ -1448,10 +1448,12 @@ MindIE 2.1.RC1 `transformer.h.*` names. Because the 2.1.RC1 generic
 creates a temporary rank-local symlink view containing the root
 config/tokenizer files plus the matching `partN-of-M` files before entering
 `examples.run_pa`. The workflow writes `quantize=w8a8s`/`w8a8sc` into new
-outputs as required by ATB. The runner also passes `--quantize w8a8sc`
-explicitly because the generic `run_pa` default is `None`. For an older output
-missing that field, the runner adds it only to the temporary config overlay.
-It does not copy or modify model weights.
+outputs as required by ATB. Some ATB releases accept a top-level
+`--quantize w8a8sc` argument and others, including MindIE 2.1.RC1, read only
+the model config. The runner detects the installed `run_pa.py` interface and
+passes the CLI argument only when it is declared. For an older output missing
+the config field, the runner adds it only to the temporary config overlay. It
+does not copy or modify model weights.
 
 Both output directories must be new or empty. The compression `TP_SIZE` must
 also be used for inference. After a restart, rerun only the pure ATB smoke:
