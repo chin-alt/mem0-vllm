@@ -127,8 +127,6 @@ source_if_present /usr/local/Ascend/ascend-toolkit/set_env.sh
 source_if_present /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 source_if_present /usr/local/Ascend/cann/set_env.sh
 source_if_present /usr/local/Ascend/nnal/atb/set_env.sh
-source_if_present /usr/local/Ascend/atb-models/set_env.sh
-source_if_present /usr/local/Ascend/mindie/latest/mindie-llm/set_env.sh
 
 if [[ -z "${ATB_SPEED_HOME_PATH}" ]]; then
   for candidate in \
@@ -140,6 +138,9 @@ if [[ -z "${ATB_SPEED_HOME_PATH}" ]]; then
       break
     fi
   done
+fi
+if [[ -n "${ATB_SPEED_HOME_PATH}" ]]; then
+  source_if_present "${ATB_SPEED_HOME_PATH}/set_env.sh"
 fi
 if [[ -z "${ATB_SPEED_HOME_PATH}" || ! -f "${ATB_SPEED_HOME_PATH}/examples/run_pa.py" ]]; then
   echo "[missing] ATB Models root; ATB_SPEED_HOME_PATH=${ATB_SPEED_HOME_PATH:-<unset>}" >&2
@@ -174,7 +175,10 @@ then
   exit 4
 fi
 
-visible_npu_count="$("${PYTHON_BOOTSTRAP}" -c 'import torch; print(torch.npu.device_count())')"
+visible_npu_count="$(
+  "${PYTHON_BOOTSTRAP}" -c \
+    'import torch; import torch_npu; print(torch.npu.device_count())'
+)"
 if (( TP_SIZE > visible_npu_count )); then
   echo "[invalid] TP_SIZE=${TP_SIZE}, but only ${visible_npu_count} NPU device(s) are visible" >&2
   exit 4

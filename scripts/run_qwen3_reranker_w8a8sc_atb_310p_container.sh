@@ -140,8 +140,6 @@ docker run --rm \
     source_if_present /usr/local/Ascend/ascend-toolkit/set_env.sh
     source_if_present /usr/local/Ascend/cann/set_env.sh
     source_if_present /usr/local/Ascend/nnal/atb/set_env.sh
-    source_if_present /usr/local/Ascend/atb-models/set_env.sh
-    source_if_present /usr/local/Ascend/mindie/latest/mindie-llm/set_env.sh
 
     atb_root="${ATB_SPEED_HOME_PATH:-}"
     if [[ -z "${atb_root}" ]]; then
@@ -154,6 +152,9 @@ docker run --rm \
           break
         fi
       done
+    fi
+    if [[ -n "${atb_root}" ]]; then
+      source_if_present "${atb_root}/set_env.sh"
     fi
     if [[ -z "${atb_root}" || ! -f "${atb_root}/examples/run_pa.py" ]]; then
       echo "[missing] examples.run_pa in the image" >&2
