@@ -20,8 +20,10 @@ from scripts.check_qwen3_reranker_w8a8_310p import (
 )
 
 
-EXPECTED_VLLM = "0.10.2"
-EXPECTED_VLLM_ASCEND = "0.10.2rc1"
+SUPPORTED_RUNTIME_PAIRS = (
+    ("0.10.0", "0.10.0rc1"),
+    ("0.10.2", "0.10.2rc1"),
+)
 QWEN3_POOLING_ARCHITECTURE = "Qwen3ForSequenceClassification"
 QWEN3_BASE_ARCHITECTURE = "Qwen3ForCausalLM"
 
@@ -45,15 +47,23 @@ def read_ascend_version(path: str, key: str) -> str:
 def qwen3_pooling_registry_supported(supported_architectures: set[str]) -> bool:
     """Check the native or adapter-backed Qwen3 classification path.
 
-    vLLM 0.10.2 registers Qwen3ForCausalLM and normalizes the synthetic
-    Qwen3ForSequenceClassification override back to that base architecture
-    before applying its classification adapter. Newer vLLM releases may
-    register the sequence-classification architecture directly.
+    The supported legacy vLLM releases register Qwen3ForCausalLM and normalize
+    the synthetic Qwen3ForSequenceClassification override back to that base
+    architecture before applying the classification adapter. Newer releases
+    may register the sequence-classification architecture directly.
     """
 
     return bool(
         {QWEN3_POOLING_ARCHITECTURE, QWEN3_BASE_ARCHITECTURE}
         & supported_architectures
+    )
+
+
+def runtime_pair_supported(vllm_version: str, ascend_version: str) -> bool:
+    return any(
+        vllm_version.startswith(expected_vllm)
+        and ascend_version.startswith(expected_ascend)
+        for expected_vllm, expected_ascend in SUPPORTED_RUNTIME_PAIRS
     )
 
 
@@ -104,11 +114,17 @@ def main() -> None:
 
     failures: list[str] = []
     warnings: list[str] = []
-    if not str(versions["vllm"]).startswith(EXPECTED_VLLM):
-        failures.append(f"expected vllm=={EXPECTED_VLLM}, got {versions['vllm']}")
-    if not str(versions["vllm_ascend"]).startswith(EXPECTED_VLLM_ASCEND):
+    if not runtime_pair_supported(
+        str(versions["vllm"]), str(versions["vllm_ascend"])
+    ):
+        supported = ", ".join(
+            f"vllm=={vllm}/vllm-ascend=={ascend}"
+            for vllm, ascend in SUPPORTED_RUNTIME_PAIRS
+        )
         failures.append(
-            f"expected vllm-ascend=={EXPECTED_VLLM_ASCEND}, got {versions['vllm_ascend']}"
+            "unsupported runtime pair "
+            f"vllm={versions['vllm']}, vllm-ascend={versions['vllm_ascend']}; "
+            f"expected one of: {supported}"
         )
     if not versions["npu_available"]:
         failures.append("torch reports that the NPU is unavailable")

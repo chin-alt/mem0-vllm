@@ -10,7 +10,7 @@ This is the host-side entry point to use after a machine restart. It:
   * starts Docker with systemd when requested and necessary;
   * verifies npu-smi, the local image, data, and static-W8A8 model;
   * reads the exact reranker instruction from the calibration/training JSONL;
-  * applies the pinned vLLM-Ascend 0.10.2rc1 310P patches in the container;
+  * applies the pinned vLLM-Ascend 0.10.0rc1 310P patches in the container;
   * runs a pooling evaluation and writes latency/quality metrics.
 
 Environment overrides:
@@ -32,7 +32,7 @@ Environment overrides:
   DEVICE_INDEX             Default: 0
   GPU_MEMORY_UTILIZATION   KV-cache memory budget. Default: 0.20
   ENABLE_PREFIX_CACHING    Default: 0
-  IMAGE                    Default: quay.nju.edu.cn/ascend/vllm-ascend:v0.10.2rc1-310p
+  IMAGE                    Default: quay.nju.edu.cn/ascend/vllm-ascend:v0.10.0rc1-310p
   PULL_IMAGE               Pull IMAGE before running. Default: 0
   START_DOCKER             Try systemctl start docker if needed. Default: 1
   INSTALL_EVAL_DEPS        Install openpyxl in the temporary container. Default: 1
@@ -73,11 +73,11 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-${BATCH_SIZE}}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$((MAX_LENGTH * BATCH_SIZE))}"
 WARMUP_PAIRS="${WARMUP_PAIRS:-${BATCH_SIZE}}"
 DEVICE_INDEX="${DEVICE_INDEX:-0}"
-# The pinned 310P plugin holds both the raw KV cache and its ACL-format copy
-# during initialization. Keep enough headroom for that temporary duplication.
+# Keep ample first-run headroom even though the pinned stable plugin performs
+# incremental K/V cache format conversion.
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.20}"
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
-IMAGE="${IMAGE:-quay.nju.edu.cn/ascend/vllm-ascend:v0.10.2rc1-310p}"
+IMAGE="${IMAGE:-quay.nju.edu.cn/ascend/vllm-ascend:v0.10.0rc1-310p}"
 PULL_IMAGE="${PULL_IMAGE:-0}"
 START_DOCKER="${START_DOCKER:-1}"
 INSTALL_EVAL_DEPS="${INSTALL_EVAL_DEPS:-1}"

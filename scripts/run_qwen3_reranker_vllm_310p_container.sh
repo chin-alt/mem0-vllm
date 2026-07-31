@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${IMAGE:-quay.nju.edu.cn/ascend/vllm-ascend:v0.10.2rc1-310p}"
+IMAGE="${IMAGE:-quay.nju.edu.cn/ascend/vllm-ascend:v0.10.0rc1-310p}"
 CONTAINER_NAME="${CONTAINER_NAME:-qwen3-reranker-vllm-310p}"
 PULL_IMAGE="${PULL_IMAGE:-1}"
 DEVICE_INDEX="${DEVICE_INDEX:-0}"
@@ -19,9 +19,9 @@ BATCH_SIZE="${BATCH_SIZE:-16}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-${BATCH_SIZE}}"
 WARMUP_PAIRS="${WARMUP_PAIRS:-16}"
-# vLLM-Ascend 0.10.2rc1 allocates the raw KV cache and its ACL-format copy at
-# the same time on 310P. A conventional 0.8-0.9 budget can therefore OOM during
-# npu_format_cast even when model profiling reports ample free memory.
+# Keep a conservative first-run KV budget. The stable 0.10.0rc1 310P plugin
+# formats K/V caches incrementally instead of the regressed 0.10.2rc1 bulk
+# conversion that can fail with SDMA/SMMU error 507013.
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.20}"
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
 VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}"

@@ -3,7 +3,7 @@
 
 This checker is intentionally read-only. It validates the ModelSlim model
 description and, unless ``--skip-runtime`` is used, checks the exact legacy
-runtime and operators used by the vllm-ascend 0.10.2rc1 310P path.
+runtime and operators used by the supported 310P paths.
 """
 
 from __future__ import annotations
@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_VLLM = "0.10.2"
-EXPECTED_VLLM_ASCEND = "0.10.2rc1"
+SUPPORTED_RUNTIME_PAIRS = (
+    ("0.10.0", "0.10.0rc1"),
+    ("0.10.2", "0.10.2rc1"),
+)
 QUANT_DESCRIPTION_NAME = "quant_model_description.json"
 BODY_WEIGHT_SUFFIXES = (
     "self_attn.q_proj.weight",
@@ -133,14 +135,21 @@ def validate_runtime(device: int) -> tuple[list[str], list[str], dict[str, str]]
         "vllm": package_version("vllm"),
         "vllm-ascend": package_version("vllm-ascend"),
     }
-    if versions["vllm"] != EXPECTED_VLLM:
-        failures.append(
-            f"expected vllm=={EXPECTED_VLLM}, found {versions['vllm'] or 'not installed'}"
+    if not any(
+        versions["vllm"].startswith(expected_vllm)
+        and versions["vllm-ascend"].startswith(expected_ascend)
+        for expected_vllm, expected_ascend in SUPPORTED_RUNTIME_PAIRS
+    ):
+        supported = ", ".join(
+            f"{vllm}/{ascend}" for vllm, ascend in SUPPORTED_RUNTIME_PAIRS
         )
-    if versions["vllm-ascend"] != EXPECTED_VLLM_ASCEND:
         failures.append(
-            "expected vllm-ascend==%s, found %s"
-            % (EXPECTED_VLLM_ASCEND, versions["vllm-ascend"] or "not installed")
+            "unsupported vllm/vllm-ascend runtime pair %s/%s; expected %s"
+            % (
+                versions["vllm"] or "not installed",
+                versions["vllm-ascend"] or "not installed",
+                supported,
+            )
         )
 
     try:

@@ -1342,9 +1342,10 @@ install `torch-npu`, set `ASCEND_RT_VISIBLE_DEVICES`, and run
 For `Qwen3-Reranker-0.6B`, try the sequence-classification pooling path before
 quantization. It replaces one-token generation plus full-vocabulary logprobs
 with the two-token yes/no classification head. The launcher keeps the host
-driver unchanged, uses the `v0.10.2rc1-310p` userspace image, applies only the
-decoder pooling fixes, runs a runtime preflight, warms up the model, and records
-batch/pair p50 and p95 latency:
+driver unchanged and uses the `v0.10.0rc1-310p` userspace image recommended by
+the vLLM-Ascend maintainers as the stable 310P release. It applies only the
+decoder pooling/W8A8 fixes, runs a runtime preflight, warms up the model, and
+records batch/pair p50 and p95 latency:
 
 ```bash
 HOST_REPO_PATH=/home/reranker_experiment/mem0-vllm \
@@ -1389,7 +1390,7 @@ The sweep also writes `benchmark_summary.json`.
 
 Static W8A8 on this legacy stack remains experimental. Export only static
 per-tensor-activation/per-channel-weight W8A8 with a ModelSlim release whose
-`quant_model_description.json` is compatible with vLLM-Ascend 0.10.2. Keep
+`quant_model_description.json` is compatible with vLLM-Ascend 0.10.0/0.10.2. Keep
 `embed_tokens` and `lm_head` as `FLOAT`; vLLM creates the converted `score`
 head as unquantized FP32. Do not use dynamic/per-token W8A8. Before loading the
 model, run the read-only preflight:
@@ -1546,7 +1547,7 @@ python scripts/check_qwen3_reranker_w8a8_310p.py \
 ```
 
 The patch keeps the synthetic Qwen3 pooling `score` head unquantized and fixes
-the missing `lm_head` prefix in vLLM 0.10.2. These avoid the two empty/missing
+the missing `lm_head` prefix in vLLM 0.10.0/0.10.2. These avoid the two empty/missing
 quantization-description key failures on this old stack. Start the quantized
 A/B run with:
 
@@ -1564,7 +1565,7 @@ temporary container, and runs the batch-1 pooling experiment:
 
 ```bash
 cd /home/reranker_experiment/mem0-vllm
-PULL_IMAGE=0 \
+PULL_IMAGE=1 \
 bash scripts/run_qwen3_reranker_w8a8_310p_inference.sh
 ```
 
@@ -1579,15 +1580,15 @@ HOST_OUTPUT_PATH=/home/reranker_experiment/output/qwen3_w8a8_bs8 \
 bash scripts/run_qwen3_reranker_w8a8_310p_inference.sh
 ```
 
-The launcher intentionally defaults `GPU_MEMORY_UTILIZATION` to `0.20` on this
-legacy 310P stack. vLLM-Ascend 0.10.2rc1 first allocates the complete raw KV
-cache and then creates an ACL-format copy while the raw buffers are still
-alive. A conventional `0.85` budget can consequently fail in
-`npu_format_cast` with `EL0004`, SDMA/SMMU error `507013`, even though model
-profiling reported free memory. In the observed 48 GB environment, `0.20`
-still provisions roughly 59,000 cache tokens, far more than the batch-1,
-1,024-token smoke run needs. Increase it only after measuring the required
-concurrency and preserving format-conversion headroom.
+The launcher intentionally defaults `GPU_MEMORY_UTILIZATION` to `0.20` for the
+first run. vLLM-Ascend 0.10.2rc1 regressed KV initialization by building large
+raw cache buffers before ACL-format conversion; on the 24.1.RC2.x driver this
+can fail asynchronously with `EL0004`, SDMA/SMMU error `507013`. Reducing the
+budget shrinks the failing copy but does not remove the regression. The
+officially recommended `v0.10.0rc1-310p` image instead allocates and formats K
+and V caches incrementally per layer, so the launcher pins that image while
+leaving the host driver unchanged. See the upstream
+[310P issue](https://github.com/vllm-project/vllm-ascend/issues/3017).
 
 ```bash
 HOST_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8 \

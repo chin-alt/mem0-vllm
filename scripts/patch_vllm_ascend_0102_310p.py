@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply narrowly scoped vLLM-Ascend 0.10.2rc1 fixes for 310P pooling."""
+"""Apply narrowly scoped legacy vLLM-Ascend fixes for 310P pooling."""
 
 import argparse
 import importlib.metadata
@@ -9,15 +9,26 @@ from pathlib import Path
 from packaging.version import InvalidVersion, Version
 
 
-SUPPORTED_VERSION = "0.10.2rc1"
+STABLE_ASCEND_VERSION = "0.10.0rc1"
+REGRESSION_ASCEND_VERSION = "0.10.2rc1"
+SUPPORTED_ASCEND_VERSIONS = (
+    STABLE_ASCEND_VERSION,
+    REGRESSION_ASCEND_VERSION,
+)
+SUPPORTED_VLLM_VERSIONS = ("0.10.0", "0.10.2")
 CALL = "        self._warm_up_atb()"
 MARKER = "        pass  # MEMRANKER_310P_SKIP_ATB_WARMUP"
+STABLE_WORKER_FINGERPRINT = "    def compile_or_warm_up_model(self) -> None:\n"
+STABLE_WORKER_DUMMY_RUN = "            self.model_runner._dummy_run(size)\n"
 POOLING_CONDITION = "            if not model_config.is_multimodal_model and \\\n"
 POOLING_REPLACEMENT = (
     "            if model_config.runner_type != \"pooling\" and \\\n"
     "                not model_config.is_multimodal_model and \\\n"
 )
 POOLING_MARKER = "model_config.runner_type != \"pooling\""
+STABLE_PLATFORM_SCHEDULER = (
+    "        if ascend_config.ascend_scheduler_config.enabled:\n"
+)
 ENCODER_IMPORT = (
     "from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,\n"
     "                                        KVCacheConfig, KVCacheSpec, MambaSpec)"
@@ -165,6 +176,15 @@ VLLM_LM_HEAD_BLOCK_REPLACEMENT = '''        model.lm_head = ParallelLMHead(model
                                        prefix="lm_head")  # MEMRANKER_QWEN3_LM_HEAD_PREFIX
 '''
 VLLM_LM_HEAD_MARKER = "MEMRANKER_QWEN3_LM_HEAD_PREFIX"
+VLLM_0100_LM_HEAD_BLOCK = '''        model.lm_head = ParallelLMHead(model.config.vocab_size,
+                                       model.config.hidden_size,
+                                       quant_config=model.quant_config)
+'''
+VLLM_0100_LM_HEAD_BLOCK_REPLACEMENT = '''        model.lm_head = ParallelLMHead(model.config.vocab_size,
+                                       model.config.hidden_size,
+                                       quant_config=model.quant_config,
+                                       prefix="lm_head")  # MEMRANKER_QWEN3_LM_HEAD_PREFIX
+'''
 QWEN3_NORM_IMPORT = (
     "from vllm_ascend.ops.layernorm import AddRMSNormW8A8Quant\n"
 )
@@ -192,9 +212,9 @@ QWEN3_NORM_MARKER = "MEMRANKER_310P_DISABLE_ADD_RMS_NORM_QUANT"
 def has_supported_public_version(actual: str, expected: str) -> bool:
     """Accept PEP 440 local builds of the exact supported public version.
 
-    The 310P image labels its vLLM wheel ``0.10.2+empty``. The ``+empty``
-    segment identifies the local wheel build; its public API/source version is
-    still 0.10.2 and is the exact source layout this patch validates below.
+    The legacy 310P images can label a vLLM wheel with an ``+empty`` local
+    suffix. The suffix identifies the local wheel build; the public API/source
+    version remains the version validated below.
     """
 
     try:
@@ -211,10 +231,42 @@ def require_supported_version(package: str, actual: str, expected: str) -> None:
         )
 
 
+def require_one_of_supported_versions(
+    package: str, actual: str, expected_versions: tuple[str, ...]
+) -> str:
+    for expected in expected_versions:
+        if has_supported_public_version(actual, expected):
+            return expected
+    raise RuntimeError(
+        "Refusing to patch %s version %s; expected one of %s "
+        "(local build suffix allowed)"
+        % (package, actual, ", ".join(expected_versions))
+    )
+
+
+def require_supported_ascend_version(actual: str) -> str:
+    return require_one_of_supported_versions(
+        "vllm-ascend", actual, SUPPORTED_ASCEND_VERSIONS
+    )
+
+
 def patch_worker(worker_path: Path, version: str) -> bool:
-    require_supported_version("vllm-ascend", version, SUPPORTED_VERSION)
+    supported_version = require_supported_ascend_version(version)
 
     source = worker_path.read_text(encoding="utf-8")
+    if supported_version == STABLE_ASCEND_VERSION:
+        if (
+            source.count(STABLE_WORKER_FINGERPRINT) != 1
+            or source.count(STABLE_WORKER_DUMMY_RUN) != 1
+            or CALL in source
+        ):
+            raise RuntimeError(
+                "Stable vLLM-Ascend worker source does not match %s"
+                % STABLE_ASCEND_VERSION
+            )
+        # 0.10.0rc1 never calls the unsupported _warm_up_atb helper.
+        return False
+
     if MARKER in source:
         return False
     if source.count(CALL) != 1:
@@ -231,9 +283,22 @@ def patch_worker(worker_path: Path, version: str) -> bool:
 
 
 def patch_platform(platform_path: Path, version: str) -> bool:
-    require_supported_version("vllm-ascend", version, SUPPORTED_VERSION)
+    supported_version = require_supported_ascend_version(version)
 
     source = platform_path.read_text(encoding="utf-8")
+    if supported_version == STABLE_ASCEND_VERSION:
+        if (
+            source.count(STABLE_PLATFORM_SCHEDULER) != 1
+            or POOLING_CONDITION in source
+        ):
+            raise RuntimeError(
+                "Stable vLLM-Ascend platform source does not match %s"
+                % STABLE_ASCEND_VERSION
+            )
+        # 0.10.0rc1 uses the native scheduler unless its optional Ascend
+        # scheduler is explicitly enabled.
+        return False
+
     if POOLING_MARKER in source:
         return False
     if source.count(POOLING_CONDITION) != 1:
@@ -259,7 +324,9 @@ def replace_exact(source: str, old: str, new: str, label: str) -> str:
 
 
 def patch_encoder_pooling(model_runner_path: Path, attention_path: Path, version: str) -> bool:
-    require_supported_version("vllm-ascend", version, SUPPORTED_VERSION)
+    require_supported_version(
+        "vllm-ascend", version, REGRESSION_ASCEND_VERSION
+    )
 
     runner_source = model_runner_path.read_text(encoding="utf-8")
     attention_source = attention_path.read_text(encoding="utf-8")
@@ -312,11 +379,12 @@ def patch_quant_score_head(quant_config_path: Path, version: str) -> bool:
     """Keep the converted Qwen3 sequence-classification head unquantized.
 
     vLLM creates ``score`` dynamically from two rows of ``lm_head`` for the
-    original Qwen3 reranker. vllm-ascend 0.10.2rc1 otherwise looks up
+    original Qwen3 reranker. The supported legacy vllm-ascend releases
+    otherwise look up
     ``score.weight`` in ``quant_model_description.json`` and may either raise a
     KeyError or try to quantize the synthetic one-row head.
     """
-    require_supported_version("vllm-ascend", version, SUPPORTED_VERSION)
+    require_supported_ascend_version(version)
 
     source = quant_config_path.read_text(encoding="utf-8")
     if QUANT_SCORE_MARKER in source:
@@ -340,27 +408,35 @@ def patch_quant_score_head(quant_config_path: Path, version: str) -> bool:
 def patch_vllm_qwen3_lm_head_prefix(adapters_path: Path, version: str) -> bool:
     """Give temporary Qwen3 pooling LM heads their real quantization key.
 
-    vLLM 0.10.2 recreates ``lm_head`` while deriving the Qwen3 score head but
-    omits ``prefix="lm_head"``. AscendQuantConfig consequently looks up
+    vLLM 0.10.0/0.10.2 recreates ``lm_head`` while deriving the Qwen3 score
+    head but omits ``prefix="lm_head"``. AscendQuantConfig consequently looks up
     ``".weight"`` and raises a KeyError before it can see that the exported
     ``lm_head.weight`` is FLOAT.
     """
-    require_supported_version("vllm", version, "0.10.2")
+    supported_version = require_one_of_supported_versions(
+        "vllm", version, SUPPORTED_VLLM_VERSIONS
+    )
 
     source = adapters_path.read_text(encoding="utf-8")
     if VLLM_LM_HEAD_MARKER in source:
         return False
-    if source.count(VLLM_LM_HEAD_BLOCK) != 2:
+    if supported_version == "0.10.0":
+        old_block = VLLM_0100_LM_HEAD_BLOCK
+        new_block = VLLM_0100_LM_HEAD_BLOCK_REPLACEMENT
+    else:
+        old_block = VLLM_LM_HEAD_BLOCK
+        new_block = VLLM_LM_HEAD_BLOCK_REPLACEMENT
+    if source.count(old_block) != 2:
         raise RuntimeError(
             "Expected two Qwen3 pooling LM-head blocks in %s; found %d"
-            % (adapters_path, source.count(VLLM_LM_HEAD_BLOCK))
+            % (adapters_path, source.count(old_block))
         )
 
     backup = adapters_path.with_suffix(adapters_path.suffix + ".memranker.bak")
     if not backup.exists():
         backup.write_text(source, encoding="utf-8")
     adapters_path.write_text(
-        source.replace(VLLM_LM_HEAD_BLOCK, VLLM_LM_HEAD_BLOCK_REPLACEMENT),
+        source.replace(old_block, new_block),
         encoding="utf-8",
     )
     return True
@@ -374,7 +450,7 @@ def patch_qwen3_310p_norm_quant(qwen3_path: Path, version: str) -> bool:
     static W8A8 matmuls while replacing only the unsupported fused norm op.
     """
 
-    require_supported_version("vllm-ascend", version, SUPPORTED_VERSION)
+    require_supported_ascend_version(version)
     source = qwen3_path.read_text(encoding="utf-8")
     if QWEN3_NORM_MARKER in source:
         return False
@@ -487,11 +563,18 @@ def main() -> None:
         lm_head_changed = patch_vllm_qwen3_lm_head_prefix(
             adapters_path, vllm_version
         )
-    if worker_changed:
+    stable_runtime = has_supported_public_version(
+        version, STABLE_ASCEND_VERSION
+    )
+    if stable_runtime:
+        print("[patch] stable 0.10.0 worker has no unsupported ATB warm-up")
+    elif worker_changed:
         print("[patch] disabled unsupported 310P ATB warm-up in %s" % worker_path)
     else:
         print("[patch] 310P ATB warm-up patch already applied")
-    if platform_changed:
+    if stable_runtime:
+        print("[patch] stable 0.10.0 uses the native scheduler by default")
+    elif platform_changed:
         print("[patch] selected the native vLLM scheduler for pooling models in %s" % platform_path)
     else:
         print("[patch] pooling scheduler patch already applied")

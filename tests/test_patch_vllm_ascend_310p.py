@@ -18,6 +18,9 @@ from scripts.patch_vllm_ascend_0102_310p import (
     POOLING_MARKER,
     QUANT_SCORE_ANCHOR,
     QUANT_SCORE_MARKER,
+    STABLE_PLATFORM_SCHEDULER,
+    STABLE_WORKER_DUMMY_RUN,
+    STABLE_WORKER_FINGERPRINT,
     VLLM_LM_HEAD_BLOCK,
     VLLM_LM_HEAD_MARKER,
     BUILDER_BRANCH,
@@ -31,6 +34,28 @@ from scripts.patch_vllm_ascend_0102_310p import (
 
 
 class PatchVllmAscendTests(unittest.TestCase):
+    def test_stable_0100_needs_no_worker_or_scheduler_patch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker = Path(directory) / "worker_v1.py"
+            platform = Path(directory) / "platform.py"
+            worker_source = (
+                STABLE_WORKER_FINGERPRINT
+                + "        for size in warmup_sizes:\n"
+                + STABLE_WORKER_DUMMY_RUN
+            )
+            platform_source = (
+                "def check_and_update_config():\n"
+                + STABLE_PLATFORM_SCHEDULER
+                + "            pass\n"
+            )
+            worker.write_text(worker_source, encoding="utf-8")
+            platform.write_text(platform_source, encoding="utf-8")
+
+            self.assertFalse(patch_worker(worker, "0.10.0rc1"))
+            self.assertFalse(patch_platform(platform, "0.10.0rc1"))
+            self.assertEqual(worker.read_text(encoding="utf-8"), worker_source)
+            self.assertEqual(platform.read_text(encoding="utf-8"), platform_source)
+
     def test_patch_is_idempotent_and_restorable(self):
         with tempfile.TemporaryDirectory() as directory:
             worker = Path(directory) / "worker_v1.py"

@@ -7,6 +7,7 @@ from scripts.patch_vllm_ascend_0102_310p import (
     QWEN3_NORM_IMPORT,
     QWEN3_NORM_MARKER,
     QWEN3_QKV_NORM_BLOCK,
+    VLLM_0100_LM_HEAD_BLOCK,
     VLLM_LM_HEAD_BLOCK,
     VLLM_LM_HEAD_MARKER,
     has_supported_public_version,
@@ -43,6 +44,22 @@ class PatchVllmAscend310PTests(unittest.TestCase):
             self.assertEqual(source.count(VLLM_LM_HEAD_MARKER), 2)
             self.assertTrue(adapters_path.with_suffix(".py.memranker.bak").is_file())
 
+    def test_lm_head_patch_accepts_stable_0100_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adapters_path = Path(temp_dir) / "adapters.py"
+            adapters_path.write_text(
+                VLLM_0100_LM_HEAD_BLOCK + "\n" + VLLM_0100_LM_HEAD_BLOCK,
+                encoding="utf-8",
+            )
+
+            changed = patch_vllm_qwen3_lm_head_prefix(
+                adapters_path, "0.10.0+empty"
+            )
+
+            source = adapters_path.read_text(encoding="utf-8")
+            self.assertTrue(changed)
+            self.assertEqual(source.count(VLLM_LM_HEAD_MARKER), 2)
+
     def test_qwen3_310p_patch_disables_fused_norm_quant(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             qwen3_path = Path(temp_dir) / "qwen3.py"
@@ -57,7 +74,7 @@ class PatchVllmAscend310PTests(unittest.TestCase):
             )
 
             changed = patch_qwen3_310p_norm_quant(
-                qwen3_path, "0.10.2rc1"
+                qwen3_path, "0.10.0rc1"
             )
 
             source = qwen3_path.read_text(encoding="utf-8")
