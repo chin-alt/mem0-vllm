@@ -19,12 +19,13 @@ Overrides:
   DATASET                  0428caption, 0428keyword, or 0625caption.
   INSTRUCTION              Explicit instruction; otherwise read TRAIN_JSONL.
   MAX_LENGTH               Default: 1024
-  BATCH_SIZE               Default: 1
+  BATCH_SIZE               ATB micro-batch size. Default: 4
   TP_SIZE                  Must match compression. Default: 1
   EXPECTED_FBETA_BETA      Default: 0.3
   TOP_K_LIST               Default: "1 3 5 10"
   SORT_BY_LENGTH           0 or 1. Default: 1
-  PROGRESS_EVERY           Print every N ATB batches. Default: 100
+  PROGRESS_EVERY           Print every N ATB batches; 0 disables. Default: 0
+  ATB_LOG_LEVEL            ATB Python log level. Default: WARNING
   SAVE_DOC_TEXT            0 or 1. Default: 0
   IMAGE                    MindIE 2.1.RC1 300I-Duo image.
   PULL_IMAGE               0 or 1. Default: 0
@@ -57,13 +58,14 @@ PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirror.nju.edu.cn/pypi/web/simple/}"
 ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
 TP_SIZE="${TP_SIZE:-1}"
 MAX_LENGTH="${MAX_LENGTH:-1024}"
-BATCH_SIZE="${BATCH_SIZE:-1}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
 MASTER_PORT="${MASTER_PORT:-20039}"
 SHM_SIZE="${SHM_SIZE:-16g}"
 EXPECTED_FBETA_BETA="${EXPECTED_FBETA_BETA:-0.3}"
 TOP_K_LIST="${TOP_K_LIST:-1 3 5 10}"
 SORT_BY_LENGTH="${SORT_BY_LENGTH:-1}"
-PROGRESS_EVERY="${PROGRESS_EVERY:-100}"
+PROGRESS_EVERY="${PROGRESS_EVERY:-0}"
+ATB_LOG_LEVEL="${ATB_LOG_LEVEL:-WARNING}"
 SAVE_DOC_TEXT="${SAVE_DOC_TEXT:-0}"
 INSTRUCTION="${INSTRUCTION:-}"
 
@@ -99,13 +101,24 @@ for toggle in PULL_IMAGE SORT_BY_LENGTH SAVE_DOC_TEXT; do
     exit 2
   fi
 done
-for number in TP_SIZE MAX_LENGTH BATCH_SIZE MASTER_PORT PROGRESS_EVERY; do
+for number in TP_SIZE MAX_LENGTH BATCH_SIZE MASTER_PORT; do
   value="${!number}"
   if [[ ! "${value}" =~ ^[0-9]+$ ]] || (( value < 1 )); then
     echo "[invalid] ${number} must be a positive integer; got ${value}" >&2
     exit 2
   fi
 done
+if [[ ! "${PROGRESS_EVERY}" =~ ^[0-9]+$ ]]; then
+  echo "[invalid] PROGRESS_EVERY must be a non-negative integer; got ${PROGRESS_EVERY}" >&2
+  exit 2
+fi
+case "${ATB_LOG_LEVEL^^}" in
+  DEBUG|INFO|WARNING|ERROR|CRITICAL) ;;
+  *)
+    echo "[invalid] ATB_LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL" >&2
+    exit 2
+    ;;
+esac
 if ! command -v docker >/dev/null 2>&1; then
   echo "[missing] docker is not installed" >&2
   exit 3
@@ -228,6 +241,7 @@ docker run --rm \
   -e "ATB_EVAL_BATCH_SIZE=${BATCH_SIZE}" \
   -e "ATB_EVAL_SORT_BY_LENGTH=${SORT_BY_LENGTH}" \
   -e "ATB_EVAL_PROGRESS_EVERY=${PROGRESS_EVERY}" \
+  -e "ATB_EVAL_LOG_LEVEL=${ATB_LOG_LEVEL}" \
   -e "MASTER_PORT=${MASTER_PORT}" \
   -e "EXPECTED_FBETA_BETA=${EXPECTED_FBETA_BETA}" \
   -e "TOP_K_LIST=${TOP_K_LIST}" \

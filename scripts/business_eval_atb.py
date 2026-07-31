@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import atexit
+import logging
 import math
 import os
 import shutil
@@ -38,6 +39,7 @@ DOCUMENT_SEPARATOR = "\n<Document>: "
 @dataclass(frozen=True)
 class AtbPrompt:
     prompt: str
+    input_ids: tuple[int, ...]
     token_length: int
     original_token_length: int
     truncated: bool
@@ -134,6 +136,9 @@ def format_atb_prompts(
         prompts.append(
             AtbPrompt(
                 prompt=prompt,
+                input_ids=tuple(
+                    tokenizer.encode(prompt, add_special_tokens=True)
+                ),
                 token_length=token_length,
                 original_token_length=original_length,
                 truncated=truncated,
@@ -193,8 +198,8 @@ class AtbCausalLMScorer:
             os.environ.get("ATB_EVAL_SORT_BY_LENGTH", "1") == "1"
         )
         self.progress_every = max(
-            1,
-            int(os.environ.get("ATB_EVAL_PROGRESS_EVERY", "100")),
+            0,
+            int(os.environ.get("ATB_EVAL_PROGRESS_EVERY", "0")),
         )
         runtime_model, temporary_model = prepare_flat_model(
             Path(model_path),
@@ -211,6 +216,25 @@ class AtbCausalLMScorer:
 
         from examples.run_pa import PARunner
         from examples.server import generate as generate_module
+
+        # PARunner is an example CLI runner rather than a serving scheduler.
+        # Its infer() logs begin/end for every micro-batch.  At thousands of
+        # batches that terminal I/O is both noisy and measurable, so keep the
+        # default at WARNING while allowing explicit overrides for diagnosis.
+        atb_log_level = os.environ.get("ATB_EVAL_LOG_LEVEL", "WARNING").upper()
+        try:
+            from atb_llm.utils.log import logger as atb_logger
+
+            atb_logger.setLevel(getattr(logging, atb_log_level))
+        except (ImportError, AttributeError):
+            pass
+        self.evaluation_metadata.update(
+            {
+                "atb_input_mode": "pretokenized_ids",
+                "atb_log_level": atb_log_level,
+                "atb_sort_by_length": self.sort_by_length,
+            }
+        )
 
         self.generate_module = generate_module
         self.runner = PARunner(
@@ -236,7 +260,7 @@ class AtbCausalLMScorer:
         atexit.register(shutil.rmtree, self.logits_dir, ignore_errors=True)
         self.runner.warm_up()
 
-    def _score_batch(self, prompts: list[str]) -> tuple[list[float], float]:
+    def _score_batch(self, input_ids: list[list[int]]) -> tuple[list[float], float]:
         original_chooser = getattr(
             self.generate_module,
             "next_token_chooser",
@@ -269,11 +293,11 @@ class AtbCausalLMScorer:
 
         try:
             _texts, _token_nums, atb_seconds = self.runner.infer(
-                prompts,
-                len(prompts),
+                [],
+                len(input_ids),
                 1,
                 False,
-                None,
+                input_ids,
             )
         finally:
             if capture is not None:
@@ -288,9 +312,9 @@ class AtbCausalLMScorer:
                 self.no_token_id,
             )
         )
-        if len(scores) != len(prompts):
+        if len(scores) != len(input_ids):
             raise RuntimeError(
-                f"ATB score count mismatch: {len(scores)} != {len(prompts)}"
+                f"ATB score count mismatch: {len(scores)} != {len(input_ids)}"
             )
         return scores, float(atb_seconds)
 
@@ -341,14 +365,14 @@ class AtbCausalLMScorer:
         for start in range(0, len(indexed), batch_size):
             batch = indexed[start : start + batch_size]
             batch_scores, atb_seconds = self._score_batch(
-                [item[1].prompt for item in batch]
+                [list(item[1].input_ids) for item in batch]
             )
             total_atb_seconds += atb_seconds
             num_batches += 1
             for (original_index, _prompt), score in zip(batch, batch_scores):
                 scores[original_index] = score
             scored = min(start + len(batch), len(indexed))
-            if self.rank == 0 and (
+            if self.rank == 0 and self.progress_every > 0 and (
                 num_batches == 1
                 or num_batches % self.progress_every == 0
                 or scored == len(indexed)

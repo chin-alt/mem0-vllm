@@ -43,6 +43,10 @@ class AtbBusinessEvaluationTests(unittest.TestCase):
             max_length=len(expected),
         )
         self.assertEqual(prompts[0].prompt, expected)
+        self.assertEqual(
+            list(prompts[0].input_ids),
+            FakeTokenizer().encode(expected),
+        )
         self.assertEqual(prompts[0].token_length, len(expected))
         self.assertFalse(prompts[0].truncated)
 
