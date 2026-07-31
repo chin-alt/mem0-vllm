@@ -19,7 +19,10 @@ BATCH_SIZE="${BATCH_SIZE:-16}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-${BATCH_SIZE}}"
 WARMUP_PAIRS="${WARMUP_PAIRS:-16}"
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
+# vLLM-Ascend 0.10.2rc1 allocates the raw KV cache and its ACL-format copy at
+# the same time on 310P. A conventional 0.8-0.9 budget can therefore OOM during
+# npu_format_cast even when model profiling reports ample free memory.
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.20}"
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
 VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}"
 INSTALL_EVAL_DEPS="${INSTALL_EVAL_DEPS:-1}"

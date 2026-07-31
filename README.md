@@ -1579,6 +1579,16 @@ HOST_OUTPUT_PATH=/home/reranker_experiment/output/qwen3_w8a8_bs8 \
 bash scripts/run_qwen3_reranker_w8a8_310p_inference.sh
 ```
 
+The launcher intentionally defaults `GPU_MEMORY_UTILIZATION` to `0.20` on this
+legacy 310P stack. vLLM-Ascend 0.10.2rc1 first allocates the complete raw KV
+cache and then creates an ACL-format copy while the raw buffers are still
+alive. A conventional `0.85` budget can consequently fail in
+`npu_format_cast` with `EL0004`, SDMA/SMMU error `507013`, even though model
+profiling reported free memory. In the observed 48 GB environment, `0.20`
+still provisions roughly 59,000 cache tokens, far more than the batch-1,
+1,024-token smoke run needs. Increase it only after measuring the required
+concurrency and preserving format-conversion headroom.
+
 ```bash
 HOST_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8 \
 HOST_OUTPUT_BASE=/home/reranker_experiment/output/qwen3_310p_w8a8_ab \

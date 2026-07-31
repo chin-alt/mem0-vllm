@@ -30,7 +30,7 @@ Environment overrides:
   MAX_NUM_BATCHED_TOKENS   Default: MAX_LENGTH * BATCH_SIZE
   WARMUP_PAIRS             Default: BATCH_SIZE
   DEVICE_INDEX             Default: 0
-  GPU_MEMORY_UTILIZATION   Default: 0.85
+  GPU_MEMORY_UTILIZATION   KV-cache memory budget. Default: 0.20
   ENABLE_PREFIX_CACHING    Default: 0
   IMAGE                    Default: quay.nju.edu.cn/ascend/vllm-ascend:v0.10.2rc1-310p
   PULL_IMAGE               Pull IMAGE before running. Default: 0
@@ -73,7 +73,9 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-${BATCH_SIZE}}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$((MAX_LENGTH * BATCH_SIZE))}"
 WARMUP_PAIRS="${WARMUP_PAIRS:-${BATCH_SIZE}}"
 DEVICE_INDEX="${DEVICE_INDEX:-0}"
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
+# The pinned 310P plugin holds both the raw KV cache and its ACL-format copy
+# during initialization. Keep enough headroom for that temporary duplication.
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.20}"
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
 IMAGE="${IMAGE:-quay.nju.edu.cn/ascend/vllm-ascend:v0.10.2rc1-310p}"
 PULL_IMAGE="${PULL_IMAGE:-0}"
@@ -171,6 +173,7 @@ echo "[config] output=${HOST_OUTPUT_PATH}"
 echo "[config] image=${IMAGE}"
 echo "[config] device=${DEVICE_INDEX} batch=${BATCH_SIZE} max_length=${MAX_LENGTH}"
 echo "[config] max_num_seqs=${MAX_NUM_SEQS} max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
+echo "[config] gpu_memory_utilization=${GPU_MEMORY_UTILIZATION} (310P KV-format-safe default: 0.20)"
 echo "[config] instruction_chars=${#INSTRUCTION}"
 
 if [[ "${DRY_RUN}" == "1" ]]; then
