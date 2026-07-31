@@ -1388,6 +1388,77 @@ Each `metrics.json` now contains `batch_latency_p50_seconds`,
 `pair_latency_p95_seconds` (the last two are amortized batch time per pair).
 The sweep also writes `benchmark_summary.json`.
 
+#### 310P W8A8SC + pure ATB path
+
+The preferred 310P INT8 experiment is now the hardware-specific sparse
+compressed path rather than dense static W8A8 under vLLM eager mode:
+
+```text
+merged FP16 model
+  -> ModelSlim W8A8S calibration on NPU
+  -> ATB Models sparse_compressor
+  -> W8A8SC weights
+  -> pure examples.run_pa inference
+```
+
+Run the complete flow from the host with:
+
+```bash
+cd /home/reranker_experiment/mem0-vllm
+
+TRAIN_JSONL=/home/reranker_experiment/data/split/train.jsonl \
+FLOAT_MODEL_PATH=/home/reranker_experiment/model/qwen3_reranker_06b_lora_merged \
+W8A8S_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8S \
+W8A8SC_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8SC \
+MAX_LENGTH=1024 \
+CALIB_SAMPLES=64 \
+CALIB_BACKEND=generate \
+TP_SIZE=1 \
+PULL_IMAGE=1 \
+bash scripts/quantize_qwen3_reranker_w8a8sc_310p_container.sh
+```
+
+The wrapper uses the MindIE `2.1.RC1-300I-Duo` image already selected for the
+fixed host `24.1.RC2.x` driver and uses the NJU PyPI mirror. It mounts the host
+driver read-only, checks for Qwen3 and the official
+`examples.convert.model_slim.sparse_compressor` before calibration, installs
+the pinned ModelSlim checkout in a persistent image-specific virtual
+environment, builds its compression executable when absent, and leaves the
+original float model unchanged.
+
+The first ModelSlim stage intentionally uses:
+
+```text
+w_bit=4, a_bit=8, co_sparse=True, is_lowbit=True,
+use_sigma=True, fraction=0.011, sigma_factor=4.0
+```
+
+For this ModelSlim API, `w_bit=4` selects the low-bit sparse construction; the
+exported description and runtime matrix type are `W8A8S`, not dense W4A8.
+`lm_head` remains floating point, while all seven Qwen3 attention/MLP
+projections, including every `down_proj`, must be W8A8S. The workflow refuses
+to compress partial coverage. The second stage validates `W8A8SC` weight,
+index, and info tensors before running a one-token pure ATB smoke test.
+
+Both output directories must be new or empty. The compression `TP_SIZE` must
+also be used for inference. After a restart, rerun only the pure ATB smoke:
+
+```bash
+HOST_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8SC \
+TP_SIZE=1 \
+PULL_IMAGE=0 \
+bash scripts/run_qwen3_reranker_w8a8sc_atb_310p_container.sh
+```
+
+This first runner verifies model loading and the one-token reranker execution
+without vLLM or MindIE Service. It does not yet compute the full business
+ranking metrics. Qwen3-Reranker-0.6B is not an officially published
+W8A8SC-310 checkpoint, so the scripts fail early on an image without Qwen3
+ATB registration instead of silently treating a dense fallback as success.
+
+The older dense static W8A8/vLLM flow below is retained only as an FP16/W8A8
+comparison and diagnostic path.
+
 Static W8A8 on this legacy stack remains experimental. Export only static
 per-tensor-activation/per-channel-weight W8A8 with a ModelSlim release whose
 `quant_model_description.json` is compatible with vLLM-Ascend 0.10.0/0.10.2. Keep
