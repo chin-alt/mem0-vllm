@@ -1530,7 +1530,7 @@ SmoothQuant can reduce accuracy:
 ```bash
 PULL_IMAGE=0 \
 ANTI_METHOD=none \
-QUANT_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8-static-noanti \
+QUANT_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8-static-noanti-v2 \
 bash scripts/quantize_qwen3_reranker_w8a8_static_310p_container.sh
 ```
 
@@ -1569,7 +1569,7 @@ PULL_IMAGE=1 \
 bash scripts/run_qwen3_reranker_w8a8_310p_inference.sh
 ```
 
-Its defaults use the `static-noanti` model and `0428caption` dataset from the
+Its defaults use the `static-noanti-v2` model and `0428caption` dataset from the
 paths documented above. Override any path or sizing option through the
 environment. For example:
 
@@ -1580,14 +1580,15 @@ HOST_OUTPUT_PATH=/home/reranker_experiment/output/qwen3_w8a8_bs8 \
 bash scripts/run_qwen3_reranker_w8a8_310p_inference.sh
 ```
 
-The launcher intentionally defaults `GPU_MEMORY_UTILIZATION` to `0.20` for the
-first run. vLLM-Ascend 0.10.2rc1 regressed KV initialization by building large
+The launcher defaults `GPU_MEMORY_UTILIZATION` to `0.85`. vLLM-Ascend
+0.10.2rc1 regressed KV initialization by building large
 raw cache buffers before ACL-format conversion; on the 24.1.RC2.x driver this
-can fail asynchronously with `EL0004`, SDMA/SMMU error `507013`. Reducing the
-budget shrinks the failing copy but does not remove the regression. The
+can fail asynchronously with `EL0004`, SDMA/SMMU error `507013`. The
 officially recommended `v0.10.0rc1-310p` image instead allocates and formats K
 and V caches incrementally per layer, so the launcher pins that image while
-leaving the host driver unchanged. See the upstream
+leaving the host driver unchanged. For batch-1 latency, a larger cache budget
+does not make model computation faster; lower it only when memory headroom is
+needed. See the upstream
 [310P issue](https://github.com/vllm-project/vllm-ascend/issues/3017).
 
 ```bash

@@ -15,7 +15,7 @@ This is the host-side entry point to use after a machine restart. It:
 
 Environment overrides:
   HOST_MODEL_PATH          Static-W8A8 model directory.
-                           Default: /home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8-static-noanti
+                           Default: /home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8-static-noanti-v2
   HOST_DATA_PATH           Business evaluation data root.
                            Default: /home/reranker_experiment/data/latency_delay
   TRAIN_JSONL              JSONL used to recover the production instruction.
@@ -30,7 +30,7 @@ Environment overrides:
   MAX_NUM_BATCHED_TOKENS   Default: MAX_LENGTH * BATCH_SIZE
   WARMUP_PAIRS             Default: BATCH_SIZE
   DEVICE_INDEX             Default: 0
-  GPU_MEMORY_UTILIZATION   KV-cache memory budget. Default: 0.20
+  GPU_MEMORY_UTILIZATION   KV-cache memory budget. Default: 0.85
   ENABLE_PREFIX_CACHING    Default: 0
   IMAGE                    Default: quay.nju.edu.cn/ascend/vllm-ascend:v0.10.0rc1-310p
   PULL_IMAGE               Pull IMAGE before running. Default: 0
@@ -61,7 +61,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 HOST_REPO_PATH="${HOST_REPO_PATH:-${REPO_ROOT}}"
-HOST_MODEL_PATH="${HOST_MODEL_PATH:-/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8-static-noanti}"
+HOST_MODEL_PATH="${HOST_MODEL_PATH:-/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8-static-noanti-v2}"
 HOST_DATA_PATH="${HOST_DATA_PATH:-/home/reranker_experiment/data/latency_delay}"
 TRAIN_JSONL="${TRAIN_JSONL:-/home/reranker_experiment/data/split/train.jsonl}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
@@ -73,9 +73,9 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-${BATCH_SIZE}}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$((MAX_LENGTH * BATCH_SIZE))}"
 WARMUP_PAIRS="${WARMUP_PAIRS:-${BATCH_SIZE}}"
 DEVICE_INDEX="${DEVICE_INDEX:-0}"
-# Keep ample first-run headroom even though the pinned stable plugin performs
-# incremental K/V cache format conversion.
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.20}"
+# vLLM-Ascend 0.10.0rc1 formats K/V caches incrementally, so the normal 310P
+# utilization can be restored without the 0.10.2rc1 bulk-format SDMA failure.
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
 IMAGE="${IMAGE:-quay.nju.edu.cn/ascend/vllm-ascend:v0.10.0rc1-310p}"
 PULL_IMAGE="${PULL_IMAGE:-0}"
@@ -173,7 +173,7 @@ echo "[config] output=${HOST_OUTPUT_PATH}"
 echo "[config] image=${IMAGE}"
 echo "[config] device=${DEVICE_INDEX} batch=${BATCH_SIZE} max_length=${MAX_LENGTH}"
 echo "[config] max_num_seqs=${MAX_NUM_SEQS} max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
-echo "[config] gpu_memory_utilization=${GPU_MEMORY_UTILIZATION} (310P KV-format-safe default: 0.20)"
+echo "[config] gpu_memory_utilization=${GPU_MEMORY_UTILIZATION} (stable 0.10.0rc1 default: 0.85)"
 echo "[config] instruction_chars=${#INSTRUCTION}"
 
 if [[ "${DRY_RUN}" == "1" ]]; then

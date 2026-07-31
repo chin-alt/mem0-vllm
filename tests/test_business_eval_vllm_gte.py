@@ -14,6 +14,7 @@ from business_eval_vllm import (  # noqa: E402
     QWEN3_RERANKER_HF_OVERRIDES,
     format_gte_score_inputs,
     format_qwen3_score_inputs,
+    pooling_api_kwargs,
     pooling_hf_overrides,
     score_with_vllm,
     summarize_batch_latency,
@@ -21,6 +22,28 @@ from business_eval_vllm import (  # noqa: E402
 
 
 class GteVllmTests(unittest.TestCase):
+    def test_pooling_api_uses_task_score_on_vllm_0100(self):
+        class LegacyLlm:
+            def __init__(self, model, *, task="auto", **kwargs):
+                pass
+
+        self.assertEqual(pooling_api_kwargs(LegacyLlm), {"task": "score"})
+
+    def test_pooling_api_uses_runner_on_vllm_0102(self):
+        class RunnerLlm:
+            def __init__(self, model, *, runner="auto", **kwargs):
+                pass
+
+        self.assertEqual(pooling_api_kwargs(RunnerLlm), {"runner": "pooling"})
+
+    def test_pooling_api_rejects_unknown_constructor(self):
+        class UnsupportedLlm:
+            def __init__(self, model, **kwargs):
+                pass
+
+        with self.assertRaisesRegex(RuntimeError, "neither"):
+            pooling_api_kwargs(UnsupportedLlm)
+
     def test_qwen3_pooling_uses_two_token_classifier(self):
         self.assertEqual(
             pooling_hf_overrides("qwen3"),

@@ -19,10 +19,9 @@ BATCH_SIZE="${BATCH_SIZE:-16}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-${BATCH_SIZE}}"
 WARMUP_PAIRS="${WARMUP_PAIRS:-16}"
-# Keep a conservative first-run KV budget. The stable 0.10.0rc1 310P plugin
-# formats K/V caches incrementally instead of the regressed 0.10.2rc1 bulk
-# conversion that can fail with SDMA/SMMU error 507013.
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.20}"
+# The stable 0.10.0rc1 310P plugin formats K/V caches incrementally instead of
+# the regressed 0.10.2rc1 bulk conversion that can fail with SDMA/SMMU 507013.
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
 VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}"
 INSTALL_EVAL_DEPS="${INSTALL_EVAL_DEPS:-1}"

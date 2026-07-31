@@ -370,6 +370,31 @@ def filter_supported_kwargs(
     return supported
 
 
+def pooling_api_kwargs(llm_cls: Callable[..., Any]) -> dict[str, str]:
+    """Select the pooling API used by the installed vLLM.
+
+    vLLM 0.10.0 exposes ``task="score"`` on ``LLM``. In 0.10.2 this was
+    replaced by ``runner="pooling"``. Inspect the public constructor instead
+    of relying on package-version strings, which may contain vendor suffixes.
+    """
+    try:
+        parameters = inspect.signature(llm_cls).parameters
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Could not inspect the installed vLLM LLM constructor to select "
+            "its pooling API."
+        ) from exc
+
+    if "runner" in parameters:
+        return {"runner": "pooling"}
+    if "task" in parameters:
+        return {"task": "score"}
+    raise RuntimeError(
+        "The installed vLLM exposes neither LLM(..., runner='pooling') nor "
+        "LLM(..., task='score'); this evaluator cannot select the score runner."
+    )
+
+
 def looks_like_local_path(model_path: str) -> bool:
     text = model_path.strip()
     return (
@@ -520,7 +545,7 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
     if getattr(args, "quantization", ""):
         llm_kwargs["quantization"] = args.quantization
     if scoring_backend == "pooling":
-        llm_kwargs["runner"] = "pooling"
+        llm_kwargs.update(pooling_api_kwargs(LLM))
         llm_kwargs["hf_overrides"] = pooling_hf_overrides(model_family)
         if model_family == "gte":
             # GTE's local tokenizer/config files use custom Auto classes. The
@@ -535,10 +560,13 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
             "This model tokenizer_config needs compatibility patching, but the installed vLLM "
             "does not support the LLM(..., tokenizer=...) argument."
         )
-    if scoring_backend == "pooling" and filtered_kwargs.get("runner") != "pooling":
+    if scoring_backend == "pooling" and not (
+        filtered_kwargs.get("runner") == "pooling"
+        or filtered_kwargs.get("task") == "score"
+    ):
         raise RuntimeError(
-            "This evaluator requires vLLM with LLM(..., runner='pooling'), "
-            "which is supported by vllm==0.10.2. Please install requirements-vllm.txt."
+            "This evaluator requires a vLLM score runner selected through "
+            "LLM(..., task='score') or LLM(..., runner='pooling')."
         )
     logger.info("Initializing vLLM with kwargs: %s", json.dumps(_jsonable(filtered_kwargs), ensure_ascii=False))
     llm = LLM(**filtered_kwargs)
@@ -548,6 +576,15 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
     setattr(llm, "_memranker_scoring_backend", scoring_backend)
     setattr(llm, "_memranker_model_family", model_family)
     setattr(llm, "_memranker_device_backend", device_backend)
+    setattr(
+        llm,
+        "_memranker_pooling_selector",
+        "runner=pooling"
+        if filtered_kwargs.get("runner") == "pooling"
+        else "task=score"
+        if filtered_kwargs.get("task") == "score"
+        else "",
+    )
     return llm
 
 
@@ -929,6 +966,7 @@ def main() -> None:
             "backend": "vllm",
             "device_backend": args.device_backend,
             "vllm_runner": "pooling" if args.scoring_backend == "pooling" else "generate",
+            "vllm_pooling_selector": getattr(llm, "_memranker_pooling_selector", ""),
             "scoring_backend": args.scoring_backend,
             "model_family": args.model_family,
             "vllm_version": getattr(llm, "_memranker_vllm_version", "unknown"),
