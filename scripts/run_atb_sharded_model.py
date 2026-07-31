@@ -109,8 +109,11 @@ def prepare_flat_model(
             continue
         symlink_entry(source, runtime_model / source.name)
     if part_dir is not None:
+        runtime_part_dir = runtime_model / part_dir.name
+        runtime_part_dir.mkdir()
         for source in part_dir.iterdir():
             symlink_entry(source, runtime_model / source.name)
+            symlink_entry(source, runtime_part_dir / source.name)
 
     if needs_config_overlay:
         runtime_config_path = runtime_model / "config.json"

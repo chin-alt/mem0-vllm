@@ -62,6 +62,9 @@ class AtbShardedModelRunnerTests(unittest.TestCase):
                 observed["has_weights"] = (
                     model_path / "model.safetensors"
                 ).is_file()
+                observed["has_sharded_weights"] = (
+                    model_path / "part0-of-1" / "model.safetensors"
+                ).is_file()
 
             argv = [
                 "run_atb_sharded_model.py",
@@ -107,6 +110,7 @@ class AtbShardedModelRunnerTests(unittest.TestCase):
             self.assertIn("--input_texts", observed["argv"])
             self.assertNotIn("--quantize", observed["argv"])
             self.assertTrue(observed["has_weights"])
+            self.assertTrue(observed["has_sharded_weights"])
             self.assertEqual(observed["config"]["quantize"], "w8a8sc")
             self.assertEqual(observed["config"]["torch_dtype"], "float16")
 
