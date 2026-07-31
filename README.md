@@ -1557,6 +1557,28 @@ RMSNorm modules in place so the existing W8A8 linear path performs separate
 `npu_quantize` and `npu_quant_matmul` calls. Matmul weights and activations
 remain INT8; only the unsupported norm/quant fusion is disabled.
 
+After a host restart, the following single entry point validates the saved
+static-W8A8 model, recovers the exact instruction from `train.jsonl`, starts
+Docker through systemd if necessary, applies the pinned 310P patches in the
+temporary container, and runs the batch-1 pooling experiment:
+
+```bash
+cd /home/reranker_experiment/mem0-vllm
+PULL_IMAGE=0 \
+bash scripts/run_qwen3_reranker_w8a8_310p_inference.sh
+```
+
+Its defaults use the `static-noanti` model and `0428caption` dataset from the
+paths documented above. Override any path or sizing option through the
+environment. For example:
+
+```bash
+BATCH_SIZE=8 \
+MAX_NUM_BATCHED_TOKENS=8192 \
+HOST_OUTPUT_PATH=/home/reranker_experiment/output/qwen3_w8a8_bs8 \
+bash scripts/run_qwen3_reranker_w8a8_310p_inference.sh
+```
+
 ```bash
 HOST_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8 \
 HOST_OUTPUT_BASE=/home/reranker_experiment/output/qwen3_310p_w8a8_ab \
