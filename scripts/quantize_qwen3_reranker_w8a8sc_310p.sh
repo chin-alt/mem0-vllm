@@ -430,8 +430,8 @@ PY
   "${MODELSLIM_PYTHON}" -m torch.distributed.run \
     --nproc_per_node "${TP_SIZE}" \
     --master_port "$((MASTER_PORT + 1))" \
-    -m examples.run_pa \
-    --model_path "${W8A8SC_MODEL_PATH}" \
+    "${REPO_ROOT}/scripts/run_atb_sharded_model.py" \
+    --model-root "${W8A8SC_MODEL_PATH}" \
     --input_texts "${smoke_input}" \
     --max_input_length "${MAX_LENGTH}" \
     --max_prefill_tokens "${MAX_PREFILL_TOKENS}" \

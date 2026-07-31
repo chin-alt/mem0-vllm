@@ -1440,10 +1440,14 @@ projections, including every `down_proj`, must be W8A8S. The workflow refuses
 to compress partial coverage. The second stage validates `W8A8SC` weight,
 index, and info tensors before running a one-token pure ATB smoke test.
 ATB stores compressed tensors below `partN-of-M/` while keeping `config.json`
-and tokenizer files at the W8A8SC root; pass the root directory to
-`examples.run_pa`. The validator checks that the number of part directories
+and tokenizer files at the W8A8SC root; pass that root directory to this
+repository's runner. The validator checks that the number of part directories
 matches `TP_SIZE` and recognizes both public Qwen fused names and the legacy
-MindIE 2.1.RC1 `transformer.h.*` names.
+MindIE 2.1.RC1 `transformer.h.*` names. Because the 2.1.RC1 generic
+`examples.run_pa` only scans one directory level for safetensors, the runner
+creates a temporary rank-local symlink view containing the root
+config/tokenizer files plus the matching `partN-of-M` files before entering
+`examples.run_pa`. It does not copy or modify model weights.
 
 Both output directories must be new or empty. The compression `TP_SIZE` must
 also be used for inference. After a restart, rerun only the pure ATB smoke:

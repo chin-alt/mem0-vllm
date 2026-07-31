@@ -82,6 +82,11 @@ if [[ ! -f "${checker}" ]]; then
   echo "[missing] ${checker}" >&2
   exit 3
 fi
+sharded_runner="${HOST_REPO_PATH}/scripts/run_atb_sharded_model.py"
+if [[ ! -f "${sharded_runner}" ]]; then
+  echo "[missing] ${sharded_runner}" >&2
+  exit 3
+fi
 if command -v python3 >/dev/null 2>&1; then
   host_python=python3
 elif command -v python >/dev/null 2>&1; then
@@ -127,6 +132,7 @@ docker run --rm \
   -e "MASTER_PORT=${MASTER_PORT}" \
   -e "INPUT_TEXT=${INPUT_TEXT}" \
   "${mount_args[@]}" \
+  -v "${HOST_REPO_PATH}:/workspace/memranker:ro" \
   -v "${HOST_MODEL_PATH}:/models/w8a8sc:ro" \
   "${IMAGE}" -lc '
     set -euo pipefail
@@ -166,8 +172,8 @@ docker run --rm \
     python3 -m torch.distributed.run \
       --nproc_per_node "${TP_SIZE}" \
       --master_port "${MASTER_PORT}" \
-      -m examples.run_pa \
-      --model_path /models/w8a8sc \
+      /workspace/memranker/scripts/run_atb_sharded_model.py \
+      --model-root /models/w8a8sc \
       --input_texts "${INPUT_TEXT}" \
       --max_input_length "${MAX_LENGTH}" \
       --max_prefill_tokens "${MAX_LENGTH}" \
