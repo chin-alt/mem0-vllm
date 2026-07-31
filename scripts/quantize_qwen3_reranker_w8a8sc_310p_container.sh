@@ -24,8 +24,9 @@ Important overrides:
   REINSTALL_MODELSLIM      Default: 0
   PIP_INDEX_URL            Default: https://mirror.nju.edu.cn/pypi/web/simple/
 
-The host driver is mounted read-only and never installed or changed. Both
-output directories must be absent or empty.
+The pinned ModelSlim source is prepared and verified on the host because the
+minimal MindIE image has no git command. The host driver is mounted read-only
+and never installed or changed. Both output directories must be absent or empty.
 EOF
 }
 
@@ -54,6 +55,8 @@ CALIB_SEED="${CALIB_SEED:-20260731}"
 CALIB_JSONL="${CALIB_JSONL:-/home/reranker_experiment/data/calibration/qwen3_reranker_w8a8s_${CALIB_BACKEND}_len${MAX_LENGTH}_n${CALIB_SAMPLES}.jsonl}"
 HOST_MODELSLIM_CACHE="${HOST_MODELSLIM_CACHE:-/home/reranker_experiment/deps}"
 HOST_VENV_CACHE="${HOST_VENV_CACHE:-/home/reranker_experiment/venvs-container-mindie21}"
+MODELSLIM_BRANCH="${MODELSLIM_BRANCH:-modelslim-VLLM-8.1.RC1.b020_001}"
+MODELSLIM_COMMIT="${MODELSLIM_COMMIT:-618633f1efbbcc41eaaeabbdfc624d2fe7264d8d}"
 ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
 TP_SIZE="${TP_SIZE:-1}"
 MULTIPROCESS_NUM="${MULTIPROCESS_NUM:-4}"
@@ -76,6 +79,10 @@ for flag in PULL_IMAGE RUN_ATB_SMOKE REINSTALL_MODELSLIM ALLOW_MULTIPLE_INSTRUCT
 done
 if ! command -v docker >/dev/null 2>&1; then
   echo "[missing] docker is not installed" >&2
+  exit 3
+fi
+if ! command -v git >/dev/null 2>&1; then
+  echo "[missing] git is required on the host to prepare ModelSlim" >&2
   exit 3
 fi
 if ! command -v npu-smi >/dev/null 2>&1 || ! npu-smi info >/dev/null; then
@@ -108,6 +115,23 @@ mkdir -p \
   "$(dirname "${CALIB_JSONL}")" \
   "${HOST_MODELSLIM_CACHE}" \
   "${HOST_VENV_CACHE}"
+
+host_modelslim_dir="${HOST_MODELSLIM_CACHE}/msit-modelslim-vllm-8.1"
+if [[ ! -d "${host_modelslim_dir}/.git" ]]; then
+  echo "[modelslim] cloning ${MODELSLIM_BRANCH} on the host"
+  git clone --depth 1 --branch "${MODELSLIM_BRANCH}" \
+    https://gitee.com/ascend/msit.git "${host_modelslim_dir}"
+fi
+host_modelslim_commit="$(git -C "${host_modelslim_dir}" rev-parse HEAD)"
+if [[ "${host_modelslim_commit}" != "${MODELSLIM_COMMIT}" ]]; then
+  echo "[invalid] host ModelSlim checkout has the wrong commit" >&2
+  echo "[invalid] HEAD=${host_modelslim_commit} expected=${MODELSLIM_COMMIT}" >&2
+  echo "[invalid] use a different HOST_MODELSLIM_CACHE or restore the pinned checkout" >&2
+  exit 3
+fi
+printf '%s\n' "${host_modelslim_commit}" \
+  > "${host_modelslim_dir}/.memranker_pinned_commit"
+echo "[modelslim] host ref=${MODELSLIM_BRANCH} commit=${host_modelslim_commit}"
 
 if [[ "${PULL_IMAGE}" == "1" ]]; then
   echo "[image] pulling ${IMAGE}"
@@ -147,6 +171,8 @@ docker_args=(
   -e "CALIB_JSONL=/calibration/${calib_name}"
   -e MODELSLIM_DIR=/cache/deps/msit-modelslim-vllm-8.1
   -e MODELSLIM_VENV=/cache/venvs/modelslim-w8a8sc-mindie21
+  -e "MODELSLIM_BRANCH=${MODELSLIM_BRANCH}"
+  -e "MODELSLIM_COMMIT=${MODELSLIM_COMMIT}"
   -e "MAX_LENGTH=${MAX_LENGTH}"
   -e "MAX_PREFILL_TOKENS=${MAX_LENGTH}"
   -e "CALIB_SAMPLES=${CALIB_SAMPLES}"

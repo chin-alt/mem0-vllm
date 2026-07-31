@@ -60,6 +60,7 @@ MASTER_PORT="${MASTER_PORT:-20037}"
 RUN_ATB_SMOKE="${RUN_ATB_SMOKE:-1}"
 MAX_PREFILL_TOKENS="${MAX_PREFILL_TOKENS:-${MAX_LENGTH}}"
 MODELSLIM_BRANCH="${MODELSLIM_BRANCH:-modelslim-VLLM-8.1.RC1.b020_001}"
+MODELSLIM_COMMIT="${MODELSLIM_COMMIT:-618633f1efbbcc41eaaeabbdfc624d2fe7264d8d}"
 MODELSLIM_DIR="${MODELSLIM_DIR:-/cache/deps/msit-modelslim-vllm-8.1}"
 MODELSLIM_VENV="${MODELSLIM_VENV:-/cache/venvs/modelslim-w8a8sc-mindie21}"
 REINSTALL_MODELSLIM="${REINSTALL_MODELSLIM:-0}"
@@ -186,28 +187,21 @@ fi
 echo "[atb] root=${ATB_SPEED_HOME_PATH}"
 echo "[atb] sparse_compressor=${SPARSE_COMPRESSOR}"
 
-if [[ ! -d "${MODELSLIM_DIR}/.git" ]]; then
-  mkdir -p "$(dirname "${MODELSLIM_DIR}")"
-  git clone --depth 1 --branch "${MODELSLIM_BRANCH}" \
-    https://gitee.com/ascend/msit.git "${MODELSLIM_DIR}"
+modelslim_commit_stamp="${MODELSLIM_DIR}/.memranker_pinned_commit"
+if [[ ! -d "${MODELSLIM_DIR}/msmodelslim" ]]; then
+  echo "[missing] host-prepared ModelSlim source: ${MODELSLIM_DIR}" >&2
+  echo "[missing] use scripts/quantize_qwen3_reranker_w8a8sc_310p_container.sh" >&2
+  exit 4
 fi
-modelslim_commit="$(git -C "${MODELSLIM_DIR}" rev-parse HEAD)"
-expected_modelslim_commit=""
-for candidate_ref in \
-  "${MODELSLIM_BRANCH}^{commit}" \
-  "refs/tags/${MODELSLIM_BRANCH}^{commit}" \
-  "refs/heads/${MODELSLIM_BRANCH}^{commit}" \
-  "refs/remotes/origin/${MODELSLIM_BRANCH}^{commit}"; do
-  if expected_modelslim_commit="$(
-    git -C "${MODELSLIM_DIR}" rev-parse --verify "${candidate_ref}" 2>/dev/null
-  )"; then
-    break
-  fi
-  expected_modelslim_commit=""
-done
-if [[ -z "${expected_modelslim_commit}" || "${modelslim_commit}" != "${expected_modelslim_commit}" ]]; then
-  echo "[invalid] ModelSlim checkout is not exactly ${MODELSLIM_BRANCH}" >&2
-  echo "[invalid] HEAD=${modelslim_commit} expected=${expected_modelslim_commit:-<missing>}" >&2
+if [[ ! -f "${modelslim_commit_stamp}" ]]; then
+  echo "[missing] host ModelSlim commit stamp: ${modelslim_commit_stamp}" >&2
+  exit 4
+fi
+modelslim_commit=""
+IFS= read -r modelslim_commit < "${modelslim_commit_stamp}" || true
+if [[ "${modelslim_commit}" != "${MODELSLIM_COMMIT}" ]]; then
+  echo "[invalid] ModelSlim checkout is not the pinned commit" >&2
+  echo "[invalid] stamp=${modelslim_commit:-<empty>} expected=${MODELSLIM_COMMIT}" >&2
   exit 4
 fi
 echo "[modelslim] ref=${MODELSLIM_BRANCH} commit=${modelslim_commit}"
