@@ -1472,17 +1472,18 @@ ranking metrics. Qwen3-Reranker-0.6B is not an officially published
 W8A8SC-310 checkpoint, so the scripts fail early on an image without Qwen3
 ATB registration instead of silently treating a dense fallback as success.
 
-After the one-token smoke succeeds, run a small `0625caption` evaluation
-through the same pure ATB model. This captures the actual first-token `yes`
-and `no` logits and uses their normalized probability as the reranking score;
-it does not rank the generated binary strings:
+After the one-token smoke succeeds, run the existing business evaluator on
+`0625caption` with its scorer replaced by the pure ATB model. Dataset parsing,
+ranking metrics, and result files still come from `src/evaluate_business.py`;
+the thin ATB adapter only captures the first-token `yes` and `no` logits and
+returns their normalized probability:
 
 ```bash
 HOST_MODEL_PATH=/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8SC-v1 \
 HOST_DATA_PATH=/home/reranker_experiment/data/latency_delay \
-HOST_OUTPUT_PATH=/home/reranker_experiment/output/qwen3_w8a8sc_atb_0625_q10 \
+TRAIN_JSONL=/home/reranker_experiment/data/split/train.jsonl \
+HOST_OUTPUT_PATH=/home/reranker_experiment/output/qwen3_w8a8sc_atb_0625 \
 DATASET=0625caption \
-MAX_QUERIES=10 \
 MAX_LENGTH=1024 \
 BATCH_SIZE=1 \
 TP_SIZE=1 \
@@ -1490,13 +1491,10 @@ PULL_IMAGE=0 \
 bash scripts/eval_qwen3_reranker_w8a8sc_atb_310p_container.sh
 ```
 
-`MAX_QUERIES=10` includes every recalled document for the first ten matching
-queries, so its per-query ranking metrics are meaningful but not the full-set
-result. After that succeeds, set `MAX_QUERIES=0` and use a new output
-directory for the complete `0625caption` evaluation. The output includes
-`metrics.json`, `predictions.jsonl`, `batch_latency.jsonl`,
-`business_eval.csv`, and `business_eval.xlsx`. The wrapper installs only the
-small evaluation dependencies `openpyxl` and `tqdm`, when missing, into a
+The wrapper reads the same production instruction from `TRAIN_JSONL` as the
+older 310P evaluation entry point. The output is the standard business result
+set: `metrics.json`, `predictions.jsonl`, `business_eval.csv`, and
+`business_eval.xlsx`. Missing `openpyxl`/`tqdm` packages are installed into a
 persistent host cache using the NJU PyPI mirror.
 
 The older dense static W8A8/vLLM flow below is retained only as an FP16/W8A8

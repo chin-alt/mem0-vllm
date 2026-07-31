@@ -700,6 +700,9 @@ def main() -> None:
             "npu_peak_reserved_mib": accelerator_peak_memory["npu_peak_reserved_mib"],
         }
     )
+    scorer_metadata = getattr(scorer, "evaluation_metadata", None)
+    if isinstance(scorer_metadata, dict):
+        metrics.update(scorer_metadata)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -15,16 +15,15 @@ Overrides:
   HOST_MODEL_PATH          W8A8SC model directory.
   HOST_OUTPUT_PATH         Host output directory.
   HOST_PYTHON_CACHE        Persistent Python package cache.
+  TRAIN_JSONL              Used to recover the production instruction.
   DATASET                  0428caption, 0428keyword, or 0625caption.
-  INSTRUCTION              Reranker instruction.
-  MAX_QUERIES              First N matching queries; 0 means full dataset.
+  INSTRUCTION              Explicit instruction; otherwise read TRAIN_JSONL.
   MAX_LENGTH               Default: 1024
   BATCH_SIZE               Default: 1
   TP_SIZE                  Must match compression. Default: 1
   EXPECTED_FBETA_BETA      Default: 0.3
   TOP_K_LIST               Default: "1 3 5 10"
   SORT_BY_LENGTH           0 or 1. Default: 1
-  SORT_DESCENDING          0 or 1. Default: 0
   SAVE_DOC_TEXT            0 or 1. Default: 0
   IMAGE                    MindIE 2.1.RC1 300I-Duo image.
   PULL_IMAGE               0 or 1. Default: 0
@@ -47,6 +46,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST_REPO_PATH="${HOST_REPO_PATH:-${REPO_ROOT}}"
 HOST_DATA_PATH="${HOST_DATA_PATH:-/home/reranker_experiment/data/latency_delay}"
 HOST_MODEL_PATH="${HOST_MODEL_PATH:-/home/reranker_experiment/model/Qwen3-Reranker-0.6B-W8A8SC}"
+TRAIN_JSONL="${TRAIN_JSONL:-/home/reranker_experiment/data/split/train.jsonl}"
 DATASET="${DATASET:-0625caption}"
 HOST_OUTPUT_PATH="${HOST_OUTPUT_PATH:-/home/reranker_experiment/output/qwen3_w8a8sc_atb_${DATASET}}"
 HOST_PYTHON_CACHE="${HOST_PYTHON_CACHE:-/home/reranker_experiment/deps/atb-eval-python}"
@@ -57,15 +57,13 @@ ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
 TP_SIZE="${TP_SIZE:-1}"
 MAX_LENGTH="${MAX_LENGTH:-1024}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
-MAX_QUERIES="${MAX_QUERIES:-0}"
 MASTER_PORT="${MASTER_PORT:-20039}"
 SHM_SIZE="${SHM_SIZE:-16g}"
 EXPECTED_FBETA_BETA="${EXPECTED_FBETA_BETA:-0.3}"
 TOP_K_LIST="${TOP_K_LIST:-1 3 5 10}"
 SORT_BY_LENGTH="${SORT_BY_LENGTH:-1}"
-SORT_DESCENDING="${SORT_DESCENDING:-0}"
 SAVE_DOC_TEXT="${SAVE_DOC_TEXT:-0}"
-INSTRUCTION="${INSTRUCTION:-Given a user query, retrieve relevant documents that answer the query.}"
+INSTRUCTION="${INSTRUCTION:-}"
 
 case "${DATASET}" in
   0428caption)
@@ -92,7 +90,7 @@ case "${DATASET}" in
     ;;
 esac
 
-for toggle in PULL_IMAGE SORT_BY_LENGTH SORT_DESCENDING SAVE_DOC_TEXT; do
+for toggle in PULL_IMAGE SORT_BY_LENGTH SAVE_DOC_TEXT; do
   value="${!toggle}"
   if [[ "${value}" != "0" && "${value}" != "1" ]]; then
     echo "[invalid] ${toggle} must be 0 or 1; got ${value}" >&2
@@ -106,10 +104,6 @@ for number in TP_SIZE MAX_LENGTH BATCH_SIZE MASTER_PORT; do
     exit 2
   fi
 done
-if [[ ! "${MAX_QUERIES}" =~ ^[0-9]+$ ]]; then
-  echo "[invalid] MAX_QUERIES must be a non-negative integer; got ${MAX_QUERIES}" >&2
-  exit 2
-fi
 if ! command -v docker >/dev/null 2>&1; then
   echo "[missing] docker is not installed" >&2
   exit 3
@@ -160,6 +154,31 @@ else
   echo "[missing] python3 or python is required for model validation" >&2
   exit 3
 fi
+if [[ -z "${INSTRUCTION}" ]]; then
+  if [[ ! -f "${TRAIN_JSONL}" ]]; then
+    echo "[missing] TRAIN_JSONL=${TRAIN_JSONL}; set INSTRUCTION explicitly to bypass it" >&2
+    exit 3
+  fi
+  INSTRUCTION="$("${host_python}" - "${TRAIN_JSONL}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    for line_number, line in enumerate(stream, 1):
+        if not line.strip():
+            continue
+        instruction = json.loads(line).get("instruction")
+        if not isinstance(instruction, str) or not instruction.strip():
+            raise SystemExit(
+                f"[invalid] {sys.argv[1]}:{line_number} has no instruction"
+            )
+        print(instruction.strip())
+        break
+    else:
+        raise SystemExit(f"[invalid] {sys.argv[1]} has no JSONL records")
+PY
+)"
+fi
 "${host_python}" "${checker}" \
   --model-path "${HOST_MODEL_PATH}" \
   --expected w8a8sc \
@@ -190,7 +209,8 @@ echo "[config] gt=${gt_file}"
 echo "[config] recall=${recall_file}"
 echo "[config] model=${HOST_MODEL_PATH}"
 echo "[config] output=${HOST_OUTPUT_PATH}"
-echo "[config] max_queries=${MAX_QUERIES} batch=${BATCH_SIZE} max_length=${MAX_LENGTH}"
+echo "[config] batch=${BATCH_SIZE} max_length=${MAX_LENGTH}"
+echo "[config] instruction_chars=${#INSTRUCTION}"
 
 docker run --rm \
   --network host \
@@ -203,12 +223,12 @@ docker run --rm \
   -e "TP_SIZE=${TP_SIZE}" \
   -e "MAX_LENGTH=${MAX_LENGTH}" \
   -e "BATCH_SIZE=${BATCH_SIZE}" \
-  -e "MAX_QUERIES=${MAX_QUERIES}" \
+  -e "ATB_EVAL_BATCH_SIZE=${BATCH_SIZE}" \
+  -e "ATB_EVAL_SORT_BY_LENGTH=${SORT_BY_LENGTH}" \
   -e "MASTER_PORT=${MASTER_PORT}" \
   -e "EXPECTED_FBETA_BETA=${EXPECTED_FBETA_BETA}" \
   -e "TOP_K_LIST=${TOP_K_LIST}" \
   -e "SORT_BY_LENGTH=${SORT_BY_LENGTH}" \
-  -e "SORT_DESCENDING=${SORT_DESCENDING}" \
   -e "SAVE_DOC_TEXT=${SAVE_DOC_TEXT}" \
   -e "INSTRUCTION=${INSTRUCTION}" \
   -e "GT_DOC_ID_COL=${gt_doc_id_col}" \
@@ -265,17 +285,9 @@ docker run --rm \
         openpyxl tqdm
     fi
 
-    sort_args=()
-    if [[ "${SORT_BY_LENGTH}" == "1" ]]; then
-      sort_args+=(--sort-by-length)
-    else
-      sort_args+=(--no-sort-by-length)
-    fi
-    if [[ "${SORT_DESCENDING}" == "1" ]]; then
-      sort_args+=(--sort-descending)
-    fi
+    optional_args=()
     if [[ "${SAVE_DOC_TEXT}" == "1" ]]; then
-      sort_args+=(--save-doc-text)
+      optional_args+=(--save_doc_text)
     fi
     read -r -a top_k_args <<< "${TOP_K_LIST}"
 
@@ -285,18 +297,19 @@ docker run --rm \
       --nproc_per_node "${TP_SIZE}" \
       --master_port "${MASTER_PORT}" \
       /workspace/memranker/scripts/business_eval_atb.py \
-      --model-root /models/w8a8sc \
-      --gt-file /inputs/ground_truth.xlsx \
-      --recall-file /inputs/recall.json \
-      --output-dir /outputs \
+      --model_path /models/w8a8sc \
+      --gt_file /inputs/ground_truth.xlsx \
+      --recall_file /inputs/recall.json \
+      --output_dir /outputs \
       --instruction "${INSTRUCTION}" \
-      --gt-doc-id-col "${GT_DOC_ID_COL}" \
-      --max-length "${MAX_LENGTH}" \
-      --batch-size "${BATCH_SIZE}" \
-      --max-queries "${MAX_QUERIES}" \
-      --expected-fbeta-beta "${EXPECTED_FBETA_BETA}" \
-      --top-k-list "${top_k_args[@]}" \
-      "${sort_args[@]}"
+      --gt_doc_id_col "${GT_DOC_ID_COL}" \
+      --max_length "${MAX_LENGTH}" \
+      --batch_size "${BATCH_SIZE}" \
+      --expected_fbeta_beta "${EXPECTED_FBETA_BETA}" \
+      --top_k_list "${top_k_args[@]}" \
+      --device npu \
+      --fp16 \
+      "${optional_args[@]}"
   '
 
 echo "[done] ATB W8A8SC evaluation: ${HOST_OUTPUT_PATH}"
