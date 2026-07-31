@@ -365,7 +365,8 @@ popd >/dev/null
 echo "[step 5/5] validating final W8A8SC model"
 "${MODELSLIM_PYTHON}" "${REPO_ROOT}/scripts/check_qwen3_reranker_w8a8sc_310p.py" \
   --model-path "${W8A8SC_MODEL_PATH}" \
-  --expected w8a8sc
+  --expected w8a8sc \
+  --expected-parts "${TP_SIZE}"
 
 "${MODELSLIM_PYTHON}" - \
   "${W8A8SC_MODEL_PATH}" "${TRAIN_JSONL}" "${CALIB_JSONL}" \

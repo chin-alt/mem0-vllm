@@ -1439,6 +1439,11 @@ exported description and runtime matrix type are `W8A8S`, not dense W4A8.
 projections, including every `down_proj`, must be W8A8S. The workflow refuses
 to compress partial coverage. The second stage validates `W8A8SC` weight,
 index, and info tensors before running a one-token pure ATB smoke test.
+ATB stores compressed tensors below `partN-of-M/` while keeping `config.json`
+and tokenizer files at the W8A8SC root; pass the root directory to
+`examples.run_pa`. The validator checks that the number of part directories
+matches `TP_SIZE` and recognizes both public Qwen fused names and the legacy
+MindIE 2.1.RC1 `transformer.h.*` names.
 
 Both output directories must be new or empty. The compression `TP_SIZE` must
 also be used for inference. After a restart, rerun only the pure ATB smoke:

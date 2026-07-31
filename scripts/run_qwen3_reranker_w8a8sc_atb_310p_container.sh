@@ -92,7 +92,8 @@ else
 fi
 "${host_python}" "${checker}" \
   --model-path "${HOST_MODEL_PATH}" \
-  --expected w8a8sc
+  --expected w8a8sc \
+  --expected-parts "${TP_SIZE}"
 
 if [[ "${PULL_IMAGE}" == "1" ]]; then
   docker pull "${IMAGE}"
