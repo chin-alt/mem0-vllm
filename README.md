@@ -1429,6 +1429,33 @@ pipeline, and wall-clock total times separately. The wall-clock total includes
 the mandatory parity gate; `pretokenized_pipeline_time_seconds` excludes only
 that verification pass and represents the steady-state inference path.
 
+For grouped reranking, one submission can still schedule many same-query
+requests concurrently before any of them has completed and populated APC. The
+hierarchical seed path creates the cache dependencies explicitly without
+adding inference pairs: it first completes the globally shortest query seed,
+then one shortest-document seed for every remaining query, and finally all
+remaining documents. Scores from all phases are restored to their original
+business-data order.
+
+```bash
+PRETOKENIZED_POOLING=0 \
+PREFIX_CACHE_SEEDING=1 \
+RESET_PREFIX_CACHE_AFTER_WARMUP=1 \
+SUBMIT_ALL_AT_ONCE=1 \
+GROUP_BY_QUERY=1 \
+ENABLE_PREFIX_CACHING=1 \
+bash scripts/run_qwen3_reranker_vllm_310p_container.sh
+```
+
+Resetting APC after the untimed kernel warm-up prevents the first query and
+global instruction from receiving an accidental head start. The seeded run
+records `prefix_cache_global_seed_time_seconds`,
+`prefix_cache_query_seeds_time_seconds`,
+`prefix_cache_remainder_time_seconds`, phase/pair counts, and the combined
+`prefix_cache_seed_total_time_seconds`. Use a different `HOST_OUTPUT_PATH` for
+the seeded run because the matrix evaluator skips an existing `metrics.json`
+by default.
+
 The patch is version checked and reversible. For Qwen3 it skips the unrelated
 GTE encoder-only attention backport:
 

@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from business_eval_vllm import (  # noqa: E402
     GTE_RERANKER_HF_OVERRIDES,
     QWEN3_RERANKER_HF_OVERRIDES,
+    build_prefix_cache_seed_phases,
     format_gte_score_inputs,
     format_qwen3_score_inputs,
     extract_vllm_score,
@@ -155,6 +156,79 @@ class GteVllmTests(unittest.TestCase):
         self.assertEqual(llm.calls[0][0], ["q1", "q1", "q2"])
         self.assertEqual(llm.calls[0][1], ["1", "333", "22"])
         self.assertEqual(scores, [333.0, 22.0, 1.0])
+
+    def test_prefix_cache_seed_plan_uses_shortest_pair_per_query_once(self):
+        indexed = [
+            (0, "q1", "333", 5),
+            (2, "q1", "1", 3),
+            (1, "q2", "22", 4),
+            (3, "q2", "4444", 6),
+            (4, "q3", "x", 3),
+        ]
+
+        phases = build_prefix_cache_seed_phases(indexed)
+
+        self.assertEqual([name for name, _ in phases], [
+            "global_seed",
+            "query_seeds",
+            "remainder",
+        ])
+        self.assertEqual([item[0] for item in phases[0][1]], [2])
+        self.assertEqual([item[0] for item in phases[1][1]], [1, 4])
+        self.assertEqual([item[0] for item in phases[2][1]], [0, 3])
+        self.assertEqual(
+            sorted(item[0] for _, phase in phases for item in phase),
+            [0, 1, 2, 3, 4],
+        )
+
+    def test_prefix_cache_seeding_scores_three_dependency_phases(self):
+        class FakeLlm:
+            _memranker_scoring_backend = "pooling"
+            _memranker_model_family = "gte"
+
+            def __init__(self):
+                self.calls = []
+
+            def score(self, queries, documents, *, truncate_prompt_tokens=None, use_tqdm=True):
+                self.calls.append((list(queries), list(documents)))
+                return [
+                    SimpleNamespace(outputs=SimpleNamespace(score=float(document)))
+                    for document in documents
+                ]
+
+        llm = FakeLlm()
+        events = []
+        timings = {}
+        scores = score_with_vllm(
+            llm,
+            queries=["q1", "q2", "q1", "q2"],
+            documents=["333", "22", "1", "4444"],
+            batch_size=16,
+            instruction="",
+            sort_by_length=True,
+            max_length=512,
+            submit_all_at_once=True,
+            group_by_query=True,
+            prefix_cache_seeding=True,
+            progress_callback=events.append,
+            timing_metrics=timings,
+        )
+
+        self.assertEqual(len(llm.calls), 3)
+        self.assertEqual(llm.calls[0][1], ["1"])
+        self.assertEqual(llm.calls[1][1], ["22"])
+        self.assertEqual(llm.calls[2][1], ["333", "4444"])
+        self.assertEqual(scores, [333.0, 22.0, 1.0, 4444.0])
+        self.assertEqual([event["phase"] for event in events], [
+            "global_seed",
+            "query_seeds",
+            "remainder",
+        ])
+        self.assertEqual(timings["prefix_cache_seed_num_queries"], 2)
+        self.assertEqual(timings["prefix_cache_seed_num_phases"], 3)
+        self.assertIn("prefix_cache_global_seed_time_seconds", timings)
+        self.assertIn("prefix_cache_query_seeds_time_seconds", timings)
+        self.assertIn("prefix_cache_remainder_time_seconds", timings)
 
     def test_pretokenized_pooling_batches_validates_and_uses_encode_score(self):
         class FakeFastTokenizer:

@@ -28,6 +28,8 @@ GROUP_BY_QUERY="${GROUP_BY_QUERY:-1}"
 SHOW_PROGRESS="${SHOW_PROGRESS:-0}"
 PRETOKENIZED_POOLING="${PRETOKENIZED_POOLING:-0}"
 TOKENIZER_BATCH_SIZE="${TOKENIZER_BATCH_SIZE:-256}"
+PREFIX_CACHE_SEEDING="${PREFIX_CACHE_SEEDING:-0}"
+RESET_PREFIX_CACHE_AFTER_WARMUP="${RESET_PREFIX_CACHE_AFTER_WARMUP:-${PREFIX_CACHE_SEEDING}}"
 VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}"
 VLLM_COMPILATION_CONFIG="${VLLM_COMPILATION_CONFIG:-}"
 if [[ -z "${VLLM_COMPILATION_CONFIG}" ]]; then
@@ -56,8 +58,35 @@ if [[ "${PRETOKENIZED_POOLING}" != "0" && "${PRETOKENIZED_POOLING}" != "1" ]]; t
   echo "[invalid] PRETOKENIZED_POOLING must be 0 or 1" >&2
   exit 2
 fi
+for flag in PREFIX_CACHE_SEEDING RESET_PREFIX_CACHE_AFTER_WARMUP; do
+  value="${!flag}"
+  if [[ "${value}" != "0" && "${value}" != "1" ]]; then
+    echo "[invalid] ${flag} must be 0 or 1" >&2
+    exit 2
+  fi
+done
 if [[ "${PRETOKENIZED_POOLING}" == "1" && "${SCORING_BACKEND}" != "pooling" ]]; then
   echo "[invalid] PRETOKENIZED_POOLING=1 requires SCORING_BACKEND=pooling" >&2
+  exit 2
+fi
+if [[ "${PREFIX_CACHE_SEEDING}" == "1" && "${ENABLE_PREFIX_CACHING}" != "1" ]]; then
+  echo "[invalid] PREFIX_CACHE_SEEDING=1 requires ENABLE_PREFIX_CACHING=1" >&2
+  exit 2
+fi
+if [[ "${RESET_PREFIX_CACHE_AFTER_WARMUP}" == "1" && "${ENABLE_PREFIX_CACHING}" != "1" ]]; then
+  echo "[invalid] RESET_PREFIX_CACHE_AFTER_WARMUP=1 requires ENABLE_PREFIX_CACHING=1" >&2
+  exit 2
+fi
+if [[ "${PREFIX_CACHE_SEEDING}" == "1" && "${SCORING_BACKEND}" != "pooling" ]]; then
+  echo "[invalid] PREFIX_CACHE_SEEDING=1 requires SCORING_BACKEND=pooling" >&2
+  exit 2
+fi
+if [[ "${PREFIX_CACHE_SEEDING}" == "1" && "${SUBMIT_ALL_AT_ONCE}" != "1" ]]; then
+  echo "[invalid] PREFIX_CACHE_SEEDING=1 requires SUBMIT_ALL_AT_ONCE=1" >&2
+  exit 2
+fi
+if [[ "${PREFIX_CACHE_SEEDING}" == "1" && "${GROUP_BY_QUERY}" != "1" ]]; then
+  echo "[invalid] PREFIX_CACHE_SEEDING=1 requires GROUP_BY_QUERY=1" >&2
   exit 2
 fi
 if ! [[ "${TOKENIZER_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
@@ -81,6 +110,7 @@ npu-smi info >/dev/null
 
 echo "[config] batch_size=${BATCH_SIZE} max_num_seqs=${MAX_NUM_SEQS} max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
 echo "[config] pretokenized_pooling=${PRETOKENIZED_POOLING} tokenizer_batch_size=${TOKENIZER_BATCH_SIZE} tokenizers_parallelism=${TOKENIZERS_PARALLELISM}"
+echo "[config] prefix_cache_seeding=${PREFIX_CACHE_SEEDING} reset_prefix_cache_after_warmup=${RESET_PREFIX_CACHE_AFTER_WARMUP}"
 echo "[config] compilation_config=${VLLM_COMPILATION_CONFIG}"
 echo "[config] task_queue=${TASK_QUEUE_ENABLE} cpu_affinity=${CPU_AFFINITY_CONF} pytorch_npu_alloc=${PYTORCH_NPU_ALLOC_CONF:-disabled}"
 
@@ -127,6 +157,8 @@ docker_args=(
   -e "PRETOKENIZED_POOLING=${PRETOKENIZED_POOLING}"
   -e "TOKENIZER_BATCH_SIZE=${TOKENIZER_BATCH_SIZE}"
   -e "TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM}"
+  -e "PREFIX_CACHE_SEEDING=${PREFIX_CACHE_SEEDING}"
+  -e "RESET_PREFIX_CACHE_AFTER_WARMUP=${RESET_PREFIX_CACHE_AFTER_WARMUP}"
   -e "VLLM_QUANTIZATION=${VLLM_QUANTIZATION}"
   -e "VLLM_COMPILATION_CONFIG=${VLLM_COMPILATION_CONFIG}"
   -e "TASK_QUEUE_ENABLE=${TASK_QUEUE_ENABLE}"

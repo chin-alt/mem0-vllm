@@ -284,6 +284,19 @@ def parse_args() -> argparse.Namespace:
         default=256,
         help="Fast-tokenizer batch size for --pretokenized_pooling. No padding is applied.",
     )
+    parser.add_argument(
+        "--prefix_cache_seeding",
+        action="store_true",
+        help=(
+            "Submit one global seed, then one shortest-document seed per remaining "
+            "query, then all remaining pairs so completed KV blocks exist before reuse."
+        ),
+    )
+    parser.add_argument(
+        "--reset_prefix_cache_after_warmup",
+        action="store_true",
+        help="Reset APC after warm-up so measured prefix seeding starts from a cold cache.",
+    )
     parser.add_argument("--sort_by_length", action="store_true", default=True)
     parser.add_argument("--no_sort_by_length", dest="sort_by_length", action="store_false")
     parser.add_argument("--sort_descending", action="store_true", help="Score longer pairs first when length sorting.")
@@ -1011,6 +1024,53 @@ def order_score_pairs(
     return ordered
 
 
+def build_prefix_cache_seed_phases(
+    indexed: list[tuple[int, str, str, int]],
+) -> list[tuple[str, list[tuple[int, str, str, int]]]]:
+    """Create dependency-ordered APC phases without adding model work.
+
+    Every selected seed is an ordinary pair that must be scored anyway. The
+    shortest pair for each query minimizes the time until its query prefix is
+    committed to APC. One globally shortest query seed is completed first so
+    the shared system/instruction blocks exist before the other query seeds.
+    """
+    if not indexed:
+        return []
+
+    query_order: list[str] = []
+    query_groups: dict[str, list[tuple[int, str, str, int]]] = {}
+    for item in indexed:
+        query = item[1]
+        if query not in query_groups:
+            query_order.append(query)
+            query_groups[query] = []
+        query_groups[query].append(item)
+
+    query_seeds = [
+        min(query_groups[query], key=lambda item: (item[3], item[0]))
+        for query in query_order
+    ]
+    global_seed = min(query_seeds, key=lambda item: (item[3], item[0]))
+    remaining_query_seeds = [item for item in query_seeds if item[0] != global_seed[0]]
+    seed_indices = {item[0] for item in query_seeds}
+    remainder = [item for item in indexed if item[0] not in seed_indices]
+
+    phases: list[tuple[str, list[tuple[int, str, str, int]]]] = [
+        ("global_seed", [global_seed]),
+    ]
+    if remaining_query_seeds:
+        phases.append(("query_seeds", remaining_query_seeds))
+    if remainder:
+        phases.append(("remainder", remainder))
+
+    flattened_indices = [item[0] for _, phase in phases for item in phase]
+    if len(flattened_indices) != len(indexed) or set(flattened_indices) != {
+        item[0] for item in indexed
+    }:
+        raise RuntimeError("Internal error: prefix-cache seed plan lost or duplicated pairs")
+    return phases
+
+
 def score_with_vllm(
     llm: Any,
     queries: list[str],
@@ -1030,6 +1090,7 @@ def score_with_vllm(
     show_progress: bool = False,
     pretokenized_pooling: bool = False,
     tokenizer_batch_size: int = 256,
+    prefix_cache_seeding: bool = False,
     timing_metrics: dict[str, Any] | None = None,
 ) -> list[float]:
     score_call_start = time.perf_counter()
@@ -1060,6 +1121,13 @@ def score_with_vllm(
             raise ValueError("PRETOKENIZED_POOLING requires --submit_all_at_once")
         if max_length is None:
             raise ValueError("PRETOKENIZED_POOLING requires --max_length")
+    if prefix_cache_seeding:
+        if backend != "pooling":
+            raise ValueError("PREFIX_CACHE_SEEDING requires --scoring_backend pooling")
+        if not submit_all_at_once:
+            raise ValueError("PREFIX_CACHE_SEEDING requires --submit_all_at_once")
+        if not group_by_query:
+            raise ValueError("PREFIX_CACHE_SEEDING requires --group_by_query")
     score_kwargs = (
         build_score_call_kwargs(llm, max_length=max_length)
         if backend == "pooling" and max_length is not None
@@ -1087,25 +1155,43 @@ def score_with_vllm(
         )
         pooling_params = build_score_pooling_params()
         encode_kwargs = build_pretokenized_encode_kwargs(llm)
-        encode_start = time.perf_counter()
-        outputs = llm.encode(token_prompts, pooling_params, **encode_kwargs)
-        encode_seconds = time.perf_counter() - encode_start
-        if len(outputs) != len(indexed):
-            raise ValueError(
-                f"vLLM returned {len(outputs)} outputs for {len(indexed)} input pairs"
-            )
-        for (original_idx, _, _, _), output in zip(indexed, outputs):
-            scores[original_idx] = extract_vllm_score(output)
-        if progress_callback is not None:
-            progress_callback(
-                {
-                    "completed": len(indexed),
-                    "total": len(indexed),
-                    "batch_size": len(indexed),
-                    "batch_seconds": encode_seconds,
-                    "max_chars": max(item[3] for item in indexed),
-                }
-            )
+        token_prompt_by_index = {
+            item[0]: token_prompt for item, token_prompt in zip(indexed, token_prompts)
+        }
+        phases = (
+            build_prefix_cache_seed_phases(indexed)
+            if prefix_cache_seeding
+            else [("all", indexed)]
+        )
+        encode_seconds = 0.0
+        completed = 0
+        phase_timings: dict[str, float] = {}
+        for phase_name, phase in phases:
+            phase_prompts = [token_prompt_by_index[item[0]] for item in phase]
+            encode_start = time.perf_counter()
+            outputs = llm.encode(phase_prompts, pooling_params, **encode_kwargs)
+            phase_seconds = time.perf_counter() - encode_start
+            encode_seconds += phase_seconds
+            phase_timings[phase_name] = float(phase_seconds)
+            if len(outputs) != len(phase):
+                raise ValueError(
+                    f"vLLM returned {len(outputs)} outputs for {len(phase)} "
+                    f"input pairs in prefix-cache phase {phase_name}"
+                )
+            for (original_idx, _, _, _), output in zip(phase, outputs):
+                scores[original_idx] = extract_vllm_score(output)
+            completed += len(phase)
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "completed": completed,
+                        "total": len(indexed),
+                        "batch_size": len(phase),
+                        "batch_seconds": phase_seconds,
+                        "max_chars": max(item[3] for item in phase),
+                        "phase": phase_name,
+                    }
+                )
         pretokenized_timings["vllm_enqueue_and_npu_execute_time_seconds"] = float(
             encode_seconds
         )
@@ -1114,23 +1200,49 @@ def score_with_vllm(
             + pretokenized_timings["tokenizer_time_seconds"]
             + encode_seconds
         )
+        if prefix_cache_seeding:
+            pretokenized_timings.update(
+                {
+                    f"prefix_cache_{phase_name}_time_seconds": phase_seconds
+                    for phase_name, phase_seconds in phase_timings.items()
+                }
+            )
+            pretokenized_timings["prefix_cache_seed_total_time_seconds"] = float(
+                encode_seconds
+            )
+            pretokenized_timings["prefix_cache_seed_num_queries"] = len(
+                {item[1] for item in indexed}
+            )
+            pretokenized_timings["prefix_cache_seed_num_pairs"] = len(
+                {item[1] for item in indexed}
+            )
+            pretokenized_timings["prefix_cache_remainder_num_pairs"] = (
+                len(indexed) - int(pretokenized_timings["prefix_cache_seed_num_pairs"])
+            )
+            pretokenized_timings["prefix_cache_seed_num_phases"] = len(phases)
         if timing_metrics is not None:
             timing_metrics.update(pretokenized_timings)
     else:
-        submission_size = len(indexed) if submit_all_at_once else batch_size
-        submission_starts = range(0, len(indexed), submission_size)
-        total_batches = math.ceil(len(indexed) / submission_size)
+        if prefix_cache_seeding:
+            planned_submissions = build_prefix_cache_seed_phases(indexed)
+        else:
+            submission_size = len(indexed) if submit_all_at_once else batch_size
+            planned_submissions = [
+                ("all" if submit_all_at_once else "chunk", indexed[start : start + submission_size])
+                for start in range(0, len(indexed), submission_size)
+            ]
         progress = tqdm(
-            submission_starts,
-            total=total_batches,
+            planned_submissions,
+            total=len(planned_submissions),
             desc="vLLM submissions",
             unit="submission",
             dynamic_ncols=True,
             ascii=True,
             disable=not show_progress,
         )
-        for start in progress:
-            batch = indexed[start : start + submission_size]
+        completed = 0
+        phase_timings = {}
+        for phase_name, batch in progress:
             batch_queries = [item[1] for item in batch]
             batch_documents = [item[2] for item in batch]
             batch_max_chars = max(item[3] for item in batch)
@@ -1160,7 +1272,10 @@ def score_with_vllm(
                 outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
             batch_seconds = time.perf_counter() - batch_start_time
             if len(outputs) != len(batch):
-                raise ValueError(f"vLLM returned {len(outputs)} outputs for {len(batch)} input pairs")
+                raise ValueError(
+                    f"vLLM returned {len(outputs)} outputs for {len(batch)} "
+                    f"input pairs in submission phase {phase_name}"
+                )
             for (original_idx, _, _, _), output in zip(batch, outputs):
                 if backend == "pooling":
                     scores[original_idx] = extract_vllm_score(output)
@@ -1168,7 +1283,10 @@ def score_with_vllm(
                     if yes_token_id is None or no_token_id is None:
                         raise RuntimeError("Internal error: missing yes/no token ids for generate scoring")
                     scores[original_idx] = extract_yes_no_score_from_generate_output(output, yes_token_id, no_token_id)
-            completed = min(start + len(batch), len(indexed))
+            completed += len(batch)
+            phase_timings[phase_name] = phase_timings.get(phase_name, 0.0) + float(
+                batch_seconds
+            )
             if show_progress:
                 progress.set_postfix(
                     scored=completed,
@@ -1183,8 +1301,29 @@ def score_with_vllm(
                         "batch_size": len(batch),
                         "batch_seconds": batch_seconds,
                         "max_chars": batch_max_chars,
+                        "phase": phase_name,
                     }
                 )
+        if prefix_cache_seeding and timing_metrics is not None:
+            timing_metrics.update(
+                {
+                    f"prefix_cache_{phase_name}_time_seconds": phase_seconds
+                    for phase_name, phase_seconds in phase_timings.items()
+                }
+            )
+            timing_metrics["prefix_cache_seed_total_time_seconds"] = float(
+                sum(phase_timings.values())
+            )
+            timing_metrics["prefix_cache_seed_num_queries"] = len(
+                {item[1] for item in indexed}
+            )
+            timing_metrics["prefix_cache_seed_num_pairs"] = len(
+                {item[1] for item in indexed}
+            )
+            timing_metrics["prefix_cache_remainder_num_pairs"] = (
+                len(indexed) - timing_metrics["prefix_cache_seed_num_pairs"]
+            )
+            timing_metrics["prefix_cache_seed_num_phases"] = len(planned_submissions)
 
     final_scores: list[float] = []
     bad_values = 0
@@ -1235,12 +1374,14 @@ def main() -> None:
     logger.info("Total query-doc pairs to score: %d", len(mapping))
     logger.info(
         "Submission plan: query_groups=%d submit_all_at_once=%s "
-        "sort_within_query=%s prefix_caching=%s pretokenized_pooling=%s",
+        "sort_within_query=%s prefix_caching=%s pretokenized_pooling=%s "
+        "prefix_cache_seeding=%s",
         len({row["query"] for row in mapping}),
         args.submit_all_at_once,
         args.sort_by_length if args.group_by_query else False,
         args.enable_prefix_caching,
         args.pretokenized_pooling,
+        args.prefix_cache_seeding,
     )
 
     if args.tokenizer_batch_size < 1:
@@ -1249,6 +1390,18 @@ def main() -> None:
         raise ValueError("--pretokenized_pooling requires --scoring_backend pooling")
     if args.pretokenized_pooling and not args.submit_all_at_once:
         raise ValueError("--pretokenized_pooling requires --submit_all_at_once")
+    if args.prefix_cache_seeding and args.scoring_backend != "pooling":
+        raise ValueError("--prefix_cache_seeding requires --scoring_backend pooling")
+    if args.prefix_cache_seeding and not args.enable_prefix_caching:
+        raise ValueError("--prefix_cache_seeding requires --enable_prefix_caching")
+    if args.prefix_cache_seeding and not args.submit_all_at_once:
+        raise ValueError("--prefix_cache_seeding requires --submit_all_at_once")
+    if args.prefix_cache_seeding and not args.group_by_query:
+        raise ValueError("--prefix_cache_seeding requires --group_by_query")
+    if args.reset_prefix_cache_after_warmup and not args.enable_prefix_caching:
+        raise ValueError(
+            "--reset_prefix_cache_after_warmup requires --enable_prefix_caching"
+        )
 
     llm = create_vllm_llm(args)
     queries = [row["query"] for row in mapping]
@@ -1277,7 +1430,21 @@ def main() -> None:
             show_progress=args.show_progress,
             pretokenized_pooling=args.pretokenized_pooling,
             tokenizer_batch_size=args.tokenizer_batch_size,
+            prefix_cache_seeding=False,
         )
+
+    prefix_cache_reset_after_warmup = False
+    if warmup_count and args.reset_prefix_cache_after_warmup:
+        reset_prefix_cache = getattr(llm, "reset_prefix_cache", None)
+        if not callable(reset_prefix_cache):
+            raise RuntimeError(
+                "The installed vLLM does not expose LLM.reset_prefix_cache(), "
+                "which is required for a cold prefix-seeding measurement."
+            )
+        if not bool(reset_prefix_cache()):
+            raise RuntimeError("vLLM refused to reset the prefix cache after warm-up")
+        prefix_cache_reset_after_warmup = True
+        logger.info("Reset vLLM prefix cache after warm-up for a cold seeded measurement")
 
     batch_latency_events: list[dict[str, Any]] = []
     scoring_timing_metrics: dict[str, Any] = {}
@@ -1301,6 +1468,7 @@ def main() -> None:
         show_progress=args.show_progress,
         pretokenized_pooling=args.pretokenized_pooling,
         tokenizer_batch_size=args.tokenizer_batch_size,
+        prefix_cache_seeding=args.prefix_cache_seeding,
         timing_metrics=scoring_timing_metrics,
     )
     score_time = time.perf_counter() - start_time
@@ -1322,6 +1490,16 @@ def main() -> None:
             scoring_timing_metrics["vllm_enqueue_and_npu_execute_time_seconds"],
             scoring_timing_metrics["pretokenized_pipeline_time_seconds"],
             scoring_timing_metrics["pretokenized_total_time_seconds"],
+        )
+    if args.prefix_cache_seeding:
+        logger.info(
+            "Prefix-cache seeded timing: global=%.3fs query_seeds=%.3fs "
+            "remainder=%.3fs total=%.3fs phases=%d",
+            scoring_timing_metrics.get("prefix_cache_global_seed_time_seconds", 0.0),
+            scoring_timing_metrics.get("prefix_cache_query_seeds_time_seconds", 0.0),
+            scoring_timing_metrics.get("prefix_cache_remainder_time_seconds", 0.0),
+            scoring_timing_metrics["prefix_cache_seed_total_time_seconds"],
+            scoring_timing_metrics["prefix_cache_seed_num_phases"],
         )
 
     ranked_predictions = attach_scores_and_ranks(
@@ -1367,6 +1545,9 @@ def main() -> None:
             "show_progress": args.show_progress,
             "pretokenized_pooling": args.pretokenized_pooling,
             "tokenizer_batch_size": args.tokenizer_batch_size,
+            "prefix_cache_seeding": args.prefix_cache_seeding,
+            "reset_prefix_cache_after_warmup": args.reset_prefix_cache_after_warmup,
+            "prefix_cache_reset_after_warmup": prefix_cache_reset_after_warmup,
             "num_query_groups": len(set(queries)),
             "num_submission_calls": len(batch_latency_events),
             "local_files_only": args.local_files_only,

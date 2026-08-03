@@ -38,6 +38,18 @@ class Qwen3RerankerVllm310pLauncherTests(unittest.TestCase):
         self.assertIn('GROUP_BY_QUERY="${GROUP_BY_QUERY:-1}"', self.script)
         self.assertIn('-e "ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING}"', self.script)
         self.assertIn('-e "GROUP_BY_QUERY=${GROUP_BY_QUERY}"', self.script)
+
+    def test_hierarchical_prefix_cache_seeding_is_forwarded(self):
+        self.assertIn('PREFIX_CACHE_SEEDING="${PREFIX_CACHE_SEEDING:-0}"', self.script)
+        self.assertIn(
+            'RESET_PREFIX_CACHE_AFTER_WARMUP="${RESET_PREFIX_CACHE_AFTER_WARMUP:-${PREFIX_CACHE_SEEDING}}"',
+            self.script,
+        )
+        self.assertIn('-e "PREFIX_CACHE_SEEDING=${PREFIX_CACHE_SEEDING}"', self.script)
+        self.assertIn(
+            '-e "RESET_PREFIX_CACHE_AFTER_WARMUP=${RESET_PREFIX_CACHE_AFTER_WARMUP}"',
+            self.script,
+        )
         self.assertIn(
             '-e "VLLM_COMPILATION_CONFIG=${VLLM_COMPILATION_CONFIG}"',
             self.script,

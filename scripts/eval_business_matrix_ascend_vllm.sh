@@ -33,6 +33,8 @@ Environment overrides:
   SHOW_PROGRESS                  Print per-submission tqdm progress. Default: 0
   PRETOKENIZED_POOLING           Batch-tokenize verified TokensPrompt inputs for LLM.encode. Default: 0
   TOKENIZER_BATCH_SIZE           Fast-tokenizer buffer size without padding. Default: 256
+  PREFIX_CACHE_SEEDING           Run global/query/remainder APC phases. Default: 0
+  RESET_PREFIX_CACHE_AFTER_WARMUP Reset APC before the measured seeded run. Default: PREFIX_CACHE_SEEDING
   VLLM_ADDITIONAL_CONFIG         Optional JSON object for LLM(..., additional_config=...).
   VLLM_COMPILATION_CONFIG        Optional JSON object for LLM(..., compilation_config=...).
   VLLM_QUANTIZATION              Optional quantization name, e.g. ascend for W8A8 weights.
@@ -88,6 +90,8 @@ GROUP_BY_QUERY="${GROUP_BY_QUERY:-1}"
 SHOW_PROGRESS="${SHOW_PROGRESS:-0}"
 PRETOKENIZED_POOLING="${PRETOKENIZED_POOLING:-0}"
 TOKENIZER_BATCH_SIZE="${TOKENIZER_BATCH_SIZE:-256}"
+PREFIX_CACHE_SEEDING="${PREFIX_CACHE_SEEDING:-0}"
+RESET_PREFIX_CACHE_AFTER_WARMUP="${RESET_PREFIX_CACHE_AFTER_WARMUP:-${PREFIX_CACHE_SEEDING}}"
 LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-1}"
 INSTRUCTION="${INSTRUCTION:-Given a user query, retrieve relevant documents that answer the query.}"
 GT_QUERY_COL="${GT_QUERY_COL:-query}"
@@ -261,6 +265,14 @@ pretokenized_args=()
 if [[ "${PRETOKENIZED_POOLING}" == "1" ]]; then
   pretokenized_args+=(--pretokenized_pooling)
 fi
+
+prefix_seed_args=()
+if [[ "${PREFIX_CACHE_SEEDING}" == "1" ]]; then
+  prefix_seed_args+=(--prefix_cache_seeding)
+fi
+if [[ "${RESET_PREFIX_CACHE_AFTER_WARMUP}" == "1" ]]; then
+  prefix_seed_args+=(--reset_prefix_cache_after_warmup)
+fi
 if [[ -n "${VLLM_LOAD_FORMAT:-}" ]]; then
   optional_vllm_args+=(--load_format "${VLLM_LOAD_FORMAT}")
 fi
@@ -363,6 +375,7 @@ run_one() {
     "${query_group_args[@]}" \
     "${progress_args[@]}" \
     "${pretokenized_args[@]}" \
+    "${prefix_seed_args[@]}" \
     "${local_model_args[@]}" \
     "${optional_vllm_args[@]}"
 
