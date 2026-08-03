@@ -1356,11 +1356,23 @@ DATASET=0428caption \
 SCORING_BACKEND=pooling \
 MAX_LENGTH=1024 \
 BATCH_SIZE=16 \
-MAX_NUM_BATCHED_TOKENS=4096 \
+MAX_NUM_SEQS=16 \
+MAX_NUM_BATCHED_TOKENS=16384 \
 WARMUP_PAIRS=16 \
 PULL_IMAGE=0 \
 bash scripts/run_qwen3_reranker_vllm_310p_container.sh
 ```
+
+This launcher enables the official 300I/310P Qwen3 eager-mode fused operators
+by default:
+
+```json
+{"custom_ops":["none","+rms_norm","+rotary_embedding"]}
+```
+
+It also defaults the engine capacity to 16 sequences and 16384 batched tokens
+when `MAX_LENGTH=1024`. Override `VLLM_COMPILATION_CONFIG`, `MAX_NUM_SEQS`, or
+`MAX_NUM_BATCHED_TOKENS` explicitly to run an A/B comparison.
 
 The business recall JSON may be a mapping from each query to its candidate
 document list. The evaluator reads the complete JSON before inference, keeps

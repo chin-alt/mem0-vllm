@@ -16,7 +16,7 @@ INSTRUCTION="${INSTRUCTION:-Given a user query, retrieve relevant documents that
 DTYPE="${DTYPE:-float16}"
 MAX_LENGTH="${MAX_LENGTH:-1024}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$((MAX_LENGTH * BATCH_SIZE))}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-${BATCH_SIZE}}"
 WARMUP_PAIRS="${WARMUP_PAIRS:-16}"
 # The stable 0.10.0rc1 310P plugin formats K/V caches incrementally instead of
@@ -27,6 +27,11 @@ SUBMIT_ALL_AT_ONCE="${SUBMIT_ALL_AT_ONCE:-1}"
 GROUP_BY_QUERY="${GROUP_BY_QUERY:-1}"
 SHOW_PROGRESS="${SHOW_PROGRESS:-0}"
 VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}"
+VLLM_COMPILATION_CONFIG="${VLLM_COMPILATION_CONFIG:-}"
+if [[ -z "${VLLM_COMPILATION_CONFIG}" ]]; then
+  # Official v0.10.0rc1-310p recommendation for Qwen3 eager inference.
+  VLLM_COMPILATION_CONFIG='{"custom_ops":["none","+rms_norm","+rotary_embedding"]}'
+fi
 INSTALL_EVAL_DEPS="${INSTALL_EVAL_DEPS:-1}"
 APPLY_310P_PATCH="${APPLY_310P_PATCH:-1}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.huaweicloud.com/repository/pypi/simple}"
@@ -49,6 +54,9 @@ if ! command -v npu-smi >/dev/null 2>&1; then
   exit 3
 fi
 npu-smi info >/dev/null
+
+echo "[config] batch_size=${BATCH_SIZE} max_num_seqs=${MAX_NUM_SEQS} max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
+echo "[config] compilation_config=${VLLM_COMPILATION_CONFIG}"
 
 if [[ "${PULL_IMAGE}" == "1" ]]; then
   docker pull "${IMAGE}"
@@ -91,6 +99,7 @@ docker_args=(
   -e "GROUP_BY_QUERY=${GROUP_BY_QUERY}"
   -e "SHOW_PROGRESS=${SHOW_PROGRESS}"
   -e "VLLM_QUANTIZATION=${VLLM_QUANTIZATION}"
+  -e "VLLM_COMPILATION_CONFIG=${VLLM_COMPILATION_CONFIG}"
   -e "INSTALL_EVAL_DEPS=${INSTALL_EVAL_DEPS}"
   -e "APPLY_310P_PATCH=${APPLY_310P_PATCH}"
   -e "PIP_INDEX_URL=${PIP_INDEX_URL}"
