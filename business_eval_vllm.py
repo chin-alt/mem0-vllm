@@ -33,6 +33,7 @@ from evaluate_business import (  # noqa: E402
     compute_business_metrics,
     load_ground_truth,
     load_recall_results,
+    select_recall_top_k,
     write_summary_csv,
     write_summary_xlsx,
 )
@@ -185,6 +186,21 @@ def reset_vllm_prefix_cache(llm: Any) -> Any:
     return result
 
 
+def count_recalled_ground_truth_docs(
+    recall_results: dict[str, list[dict[str, Any]]],
+    ground_truth: dict[str, Any],
+) -> int:
+    """Count unique ground-truth documents present in a recall candidate set."""
+    count = 0
+    for query, docs in recall_results.items():
+        gt_item = ground_truth.get(query)
+        if gt_item is None:
+            continue
+        recalled_doc_ids = {str(doc["doc_id"]) for doc in docs}
+        count += len(recalled_doc_ids & gt_item.doc_id_set)
+    return count
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate business recall data with vLLM offline LLM.score reranking."
@@ -199,6 +215,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gt_sheet", default=None, help="Optional Excel sheet name. Defaults to active sheet.")
     parser.add_argument("--recall_id_key", default="id")
     parser.add_argument("--recall_text_key", default="text")
+    parser.add_argument(
+        "--recall_top_k",
+        type=int,
+        default=0,
+        help=(
+            "Keep only the first K recalled documents per query, sorted by the "
+            "JSON index field. Zero keeps all documents."
+        ),
+    )
     parser.add_argument("--max_length", type=int, default=2048)
     parser.add_argument(
         "--batch_size",
@@ -1446,6 +1471,22 @@ def main() -> None:
         text_key=args.recall_text_key,
     )
     logger.info("Loaded recall query count: %d", len(recall_results))
+    if args.recall_top_k < 0:
+        raise ValueError("--recall_top_k must be >= 0")
+    recall_pairs_before_top_k = sum(len(docs) for docs in recall_results.values())
+    gt_docs_before_top_k = count_recalled_ground_truth_docs(recall_results, ground_truth)
+    recall_results = select_recall_top_k(recall_results, args.recall_top_k)
+    recall_pairs_after_top_k = sum(len(docs) for docs in recall_results.values())
+    gt_docs_after_top_k = count_recalled_ground_truth_docs(recall_results, ground_truth)
+    if args.recall_top_k:
+        logger.info(
+            "Applied recall Top%d by JSON index: pairs=%d->%d recalled_gt_docs=%d->%d",
+            args.recall_top_k,
+            recall_pairs_before_top_k,
+            recall_pairs_after_top_k,
+            gt_docs_before_top_k,
+            gt_docs_after_top_k,
+        )
     _input_texts, mapping, skipped_queries = build_scoring_inputs(
         recall_results,
         ground_truth,
@@ -1644,6 +1685,16 @@ def main() -> None:
             "show_progress": args.show_progress,
             "pretokenized_pooling": args.pretokenized_pooling,
             "tokenizer_batch_size": args.tokenizer_batch_size,
+            "recall_top_k": args.recall_top_k,
+            "num_recall_pairs_before_top_k": recall_pairs_before_top_k,
+            "num_recall_pairs_after_top_k": recall_pairs_after_top_k,
+            "num_recalled_gt_docs_before_top_k": gt_docs_before_top_k,
+            "num_recalled_gt_docs_after_top_k": gt_docs_after_top_k,
+            "recalled_gt_doc_retention_at_top_k": (
+                float(gt_docs_after_top_k / gt_docs_before_top_k)
+                if gt_docs_before_top_k
+                else 1.0
+            ),
             "prefix_cache_seeding": args.prefix_cache_seeding,
             "reset_prefix_cache_after_warmup": args.reset_prefix_cache_after_warmup,
             "prefix_cache_reset_after_warmup": prefix_cache_reset_after_warmup,

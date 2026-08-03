@@ -15,6 +15,7 @@ from evaluate_business import (  # noqa: E402
     GroundTruthItem,
     build_scoring_inputs,
     load_recall_results,
+    select_recall_top_k,
 )
 
 
@@ -65,6 +66,29 @@ class BusinessRecallQueryGroupTests(unittest.TestCase):
             "b-1",
             "b-2",
         ])
+
+    def test_recall_top_k_uses_json_index_not_array_order(self):
+        payload = {
+            "query-a": [
+                {"index": 21, "id": "a-21", "text": "document 21"},
+                {"index": 2, "id": "a-2", "text": "document 2"},
+                {"index": 1, "id": "a-1", "text": "document 1"},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recall_path = Path(temp_dir) / "recall.json"
+            recall_path.write_text(json.dumps(payload), encoding="utf-8")
+            recall = load_recall_results(recall_path, id_key="id", text_key="text")
+
+        selected = select_recall_top_k(recall, 2)
+        self.assertEqual(
+            [doc["doc_id"] for doc in selected["query-a"]],
+            ["a-1", "a-2"],
+        )
+        self.assertEqual(
+            [doc["source_rank"] for doc in selected["query-a"]],
+            [1, 2],
+        )
 
 
 if __name__ == "__main__":

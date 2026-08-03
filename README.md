@@ -1466,6 +1466,20 @@ values are saved as `vllm_effective_pooling_type` and
 `vllm_effective_prefix_caching`. A `None` return from the V1
 `reset_prefix_cache()` call is accepted as success; an explicit `False` is not.
 
+To test a cheaper reranking stage, set `RECALL_TOP_K` to keep only the first K
+recall candidates per query. Selection is sorted by each document's numeric
+JSON `index` field, not by its array position. The unfiltered/filtered pair
+counts and retained ground-truth-document ratio are written to `metrics.json`:
+
+```bash
+RECALL_TOP_K=20 \
+PRETOKENIZED_POOLING=1 \
+PREFIX_CACHE_SEEDING=0 \
+RESET_PREFIX_CACHE_AFTER_WARMUP=0 \
+ENABLE_PREFIX_CACHING=0 \
+bash scripts/run_qwen3_reranker_vllm_310p_container.sh
+```
+
 The patch is version checked and reversible. For Qwen3 it skips the unrelated
 GTE encoder-only attention backport:
 

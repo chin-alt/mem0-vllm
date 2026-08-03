@@ -28,6 +28,7 @@ GROUP_BY_QUERY="${GROUP_BY_QUERY:-1}"
 SHOW_PROGRESS="${SHOW_PROGRESS:-0}"
 PRETOKENIZED_POOLING="${PRETOKENIZED_POOLING:-0}"
 TOKENIZER_BATCH_SIZE="${TOKENIZER_BATCH_SIZE:-256}"
+RECALL_TOP_K="${RECALL_TOP_K:-0}"
 PREFIX_CACHE_SEEDING="${PREFIX_CACHE_SEEDING:-0}"
 RESET_PREFIX_CACHE_AFTER_WARMUP="${RESET_PREFIX_CACHE_AFTER_WARMUP:-${PREFIX_CACHE_SEEDING}}"
 VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}"
@@ -93,6 +94,10 @@ if ! [[ "${TOKENIZER_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
   echo "[invalid] TOKENIZER_BATCH_SIZE must be a positive integer" >&2
   exit 2
 fi
+if ! [[ "${RECALL_TOP_K}" =~ ^[0-9]+$ ]]; then
+  echo "[invalid] RECALL_TOP_K must be a non-negative integer" >&2
+  exit 2
+fi
 
 for path in "${HOST_REPO_PATH}" "${HOST_DATA_PATH}" "${HOST_MODEL_PATH}"; do
   if [[ ! -e "${path}" ]]; then
@@ -110,6 +115,7 @@ npu-smi info >/dev/null
 
 echo "[config] batch_size=${BATCH_SIZE} max_num_seqs=${MAX_NUM_SEQS} max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
 echo "[config] pretokenized_pooling=${PRETOKENIZED_POOLING} tokenizer_batch_size=${TOKENIZER_BATCH_SIZE} tokenizers_parallelism=${TOKENIZERS_PARALLELISM}"
+echo "[config] recall_top_k=${RECALL_TOP_K}"
 echo "[config] prefix_cache_seeding=${PREFIX_CACHE_SEEDING} reset_prefix_cache_after_warmup=${RESET_PREFIX_CACHE_AFTER_WARMUP}"
 echo "[config] compilation_config=${VLLM_COMPILATION_CONFIG}"
 echo "[config] task_queue=${TASK_QUEUE_ENABLE} cpu_affinity=${CPU_AFFINITY_CONF} pytorch_npu_alloc=${PYTORCH_NPU_ALLOC_CONF:-disabled}"
@@ -156,6 +162,7 @@ docker_args=(
   -e "SHOW_PROGRESS=${SHOW_PROGRESS}"
   -e "PRETOKENIZED_POOLING=${PRETOKENIZED_POOLING}"
   -e "TOKENIZER_BATCH_SIZE=${TOKENIZER_BATCH_SIZE}"
+  -e "RECALL_TOP_K=${RECALL_TOP_K}"
   -e "TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM}"
   -e "PREFIX_CACHE_SEEDING=${PREFIX_CACHE_SEEDING}"
   -e "RESET_PREFIX_CACHE_AFTER_WARMUP=${RESET_PREFIX_CACHE_AFTER_WARMUP}"

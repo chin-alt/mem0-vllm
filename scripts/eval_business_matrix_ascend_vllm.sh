@@ -33,6 +33,7 @@ Environment overrides:
   SHOW_PROGRESS                  Print per-submission tqdm progress. Default: 0
   PRETOKENIZED_POOLING           Batch-tokenize verified TokensPrompt inputs for LLM.encode. Default: 0
   TOKENIZER_BATCH_SIZE           Fast-tokenizer buffer size without padding. Default: 256
+  RECALL_TOP_K                   Keep first K recall docs by JSON index per query. Default: 0 (all)
   PREFIX_CACHE_SEEDING           Run global/query/remainder APC phases. Default: 0
   RESET_PREFIX_CACHE_AFTER_WARMUP Reset APC before the measured seeded run. Default: PREFIX_CACHE_SEEDING
   VLLM_ADDITIONAL_CONFIG         Optional JSON object for LLM(..., additional_config=...).
@@ -90,6 +91,7 @@ GROUP_BY_QUERY="${GROUP_BY_QUERY:-1}"
 SHOW_PROGRESS="${SHOW_PROGRESS:-0}"
 PRETOKENIZED_POOLING="${PRETOKENIZED_POOLING:-0}"
 TOKENIZER_BATCH_SIZE="${TOKENIZER_BATCH_SIZE:-256}"
+RECALL_TOP_K="${RECALL_TOP_K:-0}"
 PREFIX_CACHE_SEEDING="${PREFIX_CACHE_SEEDING:-0}"
 RESET_PREFIX_CACHE_AFTER_WARMUP="${RESET_PREFIX_CACHE_AFTER_WARMUP:-${PREFIX_CACHE_SEEDING}}"
 LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-1}"
@@ -198,6 +200,10 @@ if [[ "${DATASET}" != "all" ]]; then
   RECALL_FILES=("${RECALL_FILES[$selected_index]}")
   GT_DOC_ID_COLS=("${GT_DOC_ID_COLS[$selected_index]}")
   GT_FILE_HINTS=("${GT_FILE_HINTS[$selected_index]}")
+fi
+if ! [[ "${RECALL_TOP_K}" =~ ^[0-9]+$ ]]; then
+  echo "[error] RECALL_TOP_K must be a non-negative integer" >&2
+  exit 2
 fi
 
 read -r -a TOP_K_ARGS <<< "${TOP_K_LIST}"
@@ -359,6 +365,7 @@ run_one() {
     --max_length "${MAX_LENGTH}" \
     --batch_size "${BATCH_SIZE}" \
     --tokenizer_batch_size "${TOKENIZER_BATCH_SIZE}" \
+    --recall_top_k "${RECALL_TOP_K}" \
     --scoring_backend "${SCORING_BACKEND}" \
     --device_backend ascend \
     --dtype "${DTYPE}" \

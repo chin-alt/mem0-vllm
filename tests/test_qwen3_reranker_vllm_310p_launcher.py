@@ -45,6 +45,10 @@ class Qwen3RerankerVllm310pLauncherTests(unittest.TestCase):
             'RESET_PREFIX_CACHE_AFTER_WARMUP="${RESET_PREFIX_CACHE_AFTER_WARMUP:-${PREFIX_CACHE_SEEDING}}"',
             self.script,
         )
+
+    def test_recall_top_k_is_forwarded(self):
+        self.assertIn('RECALL_TOP_K="${RECALL_TOP_K:-0}"', self.script)
+        self.assertIn('-e "RECALL_TOP_K=${RECALL_TOP_K}"', self.script)
         self.assertIn('-e "PREFIX_CACHE_SEEDING=${PREFIX_CACHE_SEEDING}"', self.script)
         self.assertIn(
             '-e "RESET_PREFIX_CACHE_AFTER_WARMUP=${RESET_PREFIX_CACHE_AFTER_WARMUP}"',

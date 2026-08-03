@@ -220,11 +220,11 @@ def load_recall_results(
     recall_file: str | Path,
     id_key: str,
     text_key: str,
-) -> dict[str, list[dict[str, str]]]:
+) -> dict[str, list[dict[str, Any]]]:
     with Path(recall_file).open("r", encoding="utf-8-sig") as f:
         data = json.load(f)
 
-    recall: dict[str, list[dict[str, str]]] = defaultdict(list)
+    recall: dict[str, list[dict[str, Any]]] = defaultdict(list)
     skipped = 0
 
     if isinstance(data, dict):
@@ -252,13 +252,31 @@ def load_recall_results(
         if not query or not isinstance(docs_raw, list):
             skipped += 1
             continue
-        for item in docs_raw:
+        for source_position, item in enumerate(docs_raw, start=1):
             coerced = coerce_recall_doc(item, id_key=id_key, text_key=text_key)
             if coerced is None:
                 skipped += 1
                 continue
             doc_id, doc_text = coerced
-            recall[query].append({"doc_id": doc_id, "doc": doc_text})
+            raw_rank = item.get("index") if isinstance(item, dict) else None
+            source_rank_explicit = False
+            source_rank = source_position
+            if not isinstance(raw_rank, bool):
+                try:
+                    numeric_rank = float(raw_rank)
+                    if math.isfinite(numeric_rank) and numeric_rank.is_integer():
+                        source_rank = int(numeric_rank)
+                        source_rank_explicit = True
+                except (TypeError, ValueError):
+                    pass
+            recall[query].append(
+                {
+                    "doc_id": doc_id,
+                    "doc": doc_text,
+                    "source_rank": source_rank,
+                    "source_rank_explicit": source_rank_explicit,
+                }
+            )
 
     if skipped:
         logger.warning("Skipped %d malformed recall rows/docs from %s", skipped, recall_file)
@@ -266,8 +284,32 @@ def load_recall_results(
     return dict(recall)
 
 
+def select_recall_top_k(
+    recall_results: dict[str, list[dict[str, Any]]],
+    top_k: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """Keep each query's first K candidates according to the JSON ``index``."""
+    if top_k < 0:
+        raise ValueError("recall top_k must be >= 0")
+    if top_k == 0:
+        return recall_results
+
+    selected: dict[str, list[dict[str, Any]]] = {}
+    for query, docs in recall_results.items():
+        ranked_docs = sorted(
+            enumerate(docs),
+            key=lambda pair: (
+                not bool(pair[1].get("source_rank_explicit", False)),
+                int(pair[1].get("source_rank", pair[0] + 1)),
+                pair[0],
+            ),
+        )
+        selected[query] = [doc for _, doc in ranked_docs[:top_k]]
+    return selected
+
+
 def build_scoring_inputs(
-    recall_results: dict[str, list[dict[str, str]]],
+    recall_results: dict[str, list[dict[str, Any]]],
     ground_truth: dict[str, GroundTruthItem],
     instruction: str,
 ) -> tuple[list[str], list[dict[str, Any]], int]:
@@ -287,7 +329,7 @@ def build_scoring_inputs(
                     "query": query,
                     "doc_id": doc["doc_id"],
                     "doc": doc_text,
-                    "source_rank": idx + 1,
+                    "source_rank": int(doc.get("source_rank", idx + 1)),
                 }
             )
 
