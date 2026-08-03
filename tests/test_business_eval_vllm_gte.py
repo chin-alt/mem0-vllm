@@ -20,7 +20,10 @@ from business_eval_vllm import (  # noqa: E402
     order_score_pairs,
     pooling_api_kwargs,
     pooling_hf_overrides,
+    prefix_cache_pooler_override,
     prepare_pretokenized_pooling_inputs,
+    inspect_vllm_prefix_cache_state,
+    reset_vllm_prefix_cache,
     score_with_vllm,
     summarize_batch_latency,
 )
@@ -67,6 +70,37 @@ class GteVllmTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "neither"):
             pooling_api_kwargs(UnsupportedLlm)
+
+    def test_qwen3_prefix_cache_forces_last_pooler_only_when_needed(self):
+        self.assertEqual(
+            prefix_cache_pooler_override("qwen3", "pooling", True),
+            {"pooling_type": "LAST"},
+        )
+        self.assertIsNone(prefix_cache_pooler_override("qwen3", "pooling", False))
+        self.assertIsNone(prefix_cache_pooler_override("gte", "pooling", True))
+        self.assertIsNone(prefix_cache_pooler_override("qwen3", "generate", True))
+
+    def test_inspect_vllm_prefix_cache_state_reads_initialized_config(self):
+        llm = SimpleNamespace(
+            llm_engine=SimpleNamespace(
+                vllm_config=SimpleNamespace(
+                    cache_config=SimpleNamespace(enable_prefix_caching=True),
+                    model_config=SimpleNamespace(
+                        pooler_config=SimpleNamespace(pooling_type="LAST")
+                    ),
+                )
+            )
+        )
+        self.assertEqual(inspect_vllm_prefix_cache_state(llm), (True, "LAST"))
+
+    def test_reset_prefix_cache_accepts_v1_none_success_return(self):
+        llm = SimpleNamespace(reset_prefix_cache=lambda: None)
+        self.assertIsNone(reset_vllm_prefix_cache(llm))
+
+    def test_reset_prefix_cache_rejects_explicit_false(self):
+        llm = SimpleNamespace(reset_prefix_cache=lambda: False)
+        with self.assertRaisesRegex(RuntimeError, "refused"):
+            reset_vllm_prefix_cache(llm)
 
     def test_qwen3_pooling_uses_two_token_classifier(self):
         self.assertEqual(

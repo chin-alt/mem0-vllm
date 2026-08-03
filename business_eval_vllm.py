@@ -131,6 +131,60 @@ def pooling_hf_overrides(model_family: str) -> dict[str, Any]:
     raise ValueError(f"Unsupported pooling model family: {model_family}")
 
 
+def prefix_cache_pooler_override(
+    model_family: str,
+    scoring_backend: str,
+    enable_prefix_caching: bool,
+) -> dict[str, str] | None:
+    """Make vLLM's prefix-cache eligibility check match Qwen3 scoring.
+
+    vLLM 0.10.x only permits prefix caching for an explicitly configured
+    ``LAST`` pooler. Qwen3 reranking scores the final prompt token, but its
+    inferred PoolerConfig can still leave ``pooling_type`` unset early enough
+    for vLLM to disable the cache during config validation.
+    """
+    if (
+        enable_prefix_caching
+        and scoring_backend == "pooling"
+        and model_family == "qwen3"
+    ):
+        return {"pooling_type": "LAST"}
+    return None
+
+
+def inspect_vllm_prefix_cache_state(llm: Any) -> tuple[bool | None, str]:
+    """Read effective APC and pooler settings from the initialized engine."""
+    engine = getattr(llm, "llm_engine", None)
+    vllm_config = getattr(engine, "vllm_config", None)
+    cache_config = getattr(vllm_config, "cache_config", None)
+    enabled = getattr(cache_config, "enable_prefix_caching", None)
+
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        model_config = getattr(engine, "model_config", None)
+    pooler_config = getattr(model_config, "pooler_config", None)
+    pooling_type = getattr(pooler_config, "pooling_type", None)
+    if pooling_type is None:
+        pooling_type_text = ""
+    else:
+        pooling_type_text = str(getattr(pooling_type, "name", pooling_type))
+    return enabled, pooling_type_text
+
+
+def reset_vllm_prefix_cache(llm: Any) -> Any:
+    """Reset APC while accepting the None success return used by vLLM V1."""
+    reset_prefix_cache = getattr(llm, "reset_prefix_cache", None)
+    if not callable(reset_prefix_cache):
+        raise RuntimeError(
+            "The installed vLLM does not expose LLM.reset_prefix_cache(), "
+            "which is required for a cold prefix-seeding measurement."
+        )
+    result = reset_prefix_cache()
+    if result is False:
+        raise RuntimeError("vLLM refused to reset the prefix cache after warm-up")
+    return result
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate business recall data with vLLM offline LLM.score reranking."
@@ -623,6 +677,13 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
     if scoring_backend == "pooling":
         llm_kwargs.update(pooling_api_kwargs(LLM))
         llm_kwargs["hf_overrides"] = pooling_hf_overrides(model_family)
+        pooler_override = prefix_cache_pooler_override(
+            model_family,
+            scoring_backend,
+            bool(args.enable_prefix_caching),
+        )
+        if pooler_override is not None:
+            llm_kwargs["override_pooler_config"] = pooler_override
         if model_family == "gte":
             # GTE's local tokenizer/config files use custom Auto classes. The
             # model itself is still the native vLLM implementation selected by
@@ -644,6 +705,16 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
             "This evaluator requires a vLLM score runner selected through "
             "LLM(..., task='score') or LLM(..., runner='pooling')."
         )
+    if (
+        args.enable_prefix_caching
+        and model_family == "qwen3"
+        and scoring_backend == "pooling"
+        and "override_pooler_config" not in filtered_kwargs
+    ):
+        raise RuntimeError(
+            "The installed vLLM does not expose LLM(..., override_pooler_config=...). "
+            "Qwen3 pooling cannot safely enable prefix caching on this version."
+        )
     logger.info("Initializing vLLM with kwargs: %s", json.dumps(_jsonable(filtered_kwargs), ensure_ascii=False))
     llm = LLM(**filtered_kwargs)
     setattr(llm, "_memranker_vllm_version", getattr(vllm, "__version__", "unknown"))
@@ -652,6 +723,19 @@ def create_vllm_llm(args: argparse.Namespace) -> Any:
     setattr(llm, "_memranker_scoring_backend", scoring_backend)
     setattr(llm, "_memranker_model_family", model_family)
     setattr(llm, "_memranker_device_backend", device_backend)
+    effective_prefix_caching, effective_pooling_type = inspect_vllm_prefix_cache_state(llm)
+    setattr(llm, "_memranker_effective_prefix_caching", effective_prefix_caching)
+    setattr(llm, "_memranker_effective_pooling_type", effective_pooling_type)
+    setattr(
+        llm,
+        "_memranker_pooler_override",
+        filtered_kwargs.get("override_pooler_config", {}),
+    )
+    logger.info(
+        "Effective vLLM pooling config: pooling_type=%s prefix_caching=%s",
+        effective_pooling_type or "<unset>",
+        effective_prefix_caching,
+    )
     setattr(
         llm,
         "_memranker_pooling_selector",
@@ -1404,6 +1488,21 @@ def main() -> None:
         )
 
     llm = create_vllm_llm(args)
+    effective_prefix_caching = getattr(llm, "_memranker_effective_prefix_caching", None)
+    effective_pooling_type = getattr(llm, "_memranker_effective_pooling_type", "")
+    if args.prefix_cache_seeding:
+        if effective_prefix_caching is not True:
+            raise RuntimeError(
+                "PREFIX_CACHE_SEEDING was requested, but initialized vLLM has "
+                f"enable_prefix_caching={effective_prefix_caching!r} "
+                f"and pooling_type={effective_pooling_type or '<unset>'}. "
+                "Refusing to report a non-APC run as a prefix-cache experiment."
+            )
+        if effective_pooling_type.upper() != "LAST":
+            raise RuntimeError(
+                "PREFIX_CACHE_SEEDING requires the Qwen3 LAST pooler; initialized "
+                f"vLLM reports pooling_type={effective_pooling_type or '<unset>'}."
+            )
     queries = [row["query"] for row in mapping]
     documents = [row["doc"] for row in mapping]
 
@@ -1435,16 +1534,13 @@ def main() -> None:
 
     prefix_cache_reset_after_warmup = False
     if warmup_count and args.reset_prefix_cache_after_warmup:
-        reset_prefix_cache = getattr(llm, "reset_prefix_cache", None)
-        if not callable(reset_prefix_cache):
-            raise RuntimeError(
-                "The installed vLLM does not expose LLM.reset_prefix_cache(), "
-                "which is required for a cold prefix-seeding measurement."
-            )
-        if not bool(reset_prefix_cache()):
-            raise RuntimeError("vLLM refused to reset the prefix cache after warm-up")
+        reset_result = reset_vllm_prefix_cache(llm)
         prefix_cache_reset_after_warmup = True
-        logger.info("Reset vLLM prefix cache after warm-up for a cold seeded measurement")
+        logger.info(
+            "Reset vLLM prefix cache after warm-up for a cold seeded measurement "
+            "(return=%r)",
+            reset_result,
+        )
 
     batch_latency_events: list[dict[str, Any]] = []
     scoring_timing_metrics: dict[str, Any] = {}
@@ -1521,6 +1617,9 @@ def main() -> None:
             "device_backend": args.device_backend,
             "vllm_runner": "pooling" if args.scoring_backend == "pooling" else "generate",
             "vllm_pooling_selector": getattr(llm, "_memranker_pooling_selector", ""),
+            "vllm_effective_prefix_caching": effective_prefix_caching,
+            "vllm_effective_pooling_type": effective_pooling_type,
+            "vllm_pooler_override": getattr(llm, "_memranker_pooler_override", {}),
             "scoring_backend": args.scoring_backend,
             "model_family": args.model_family,
             "vllm_version": getattr(llm, "_memranker_vllm_version", "unknown"),

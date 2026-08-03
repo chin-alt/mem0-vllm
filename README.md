@@ -1456,6 +1456,16 @@ records `prefix_cache_global_seed_time_seconds`,
 the seeded run because the matrix evaluator skips an existing `metrics.json`
 by default.
 
+For Qwen3 pooling with APC enabled, the evaluator explicitly passes
+`override_pooler_config={"pooling_type":"LAST"}`. This matches the reranker's
+final-token score and prevents vLLM 0.10.x from silently disabling prefix
+caching when its inferred pooling type is unset. After initialization the
+evaluator reads the effective engine configuration and refuses a seeded run
+unless it reports both `pooling_type=LAST` and `prefix_caching=True`. These
+values are saved as `vllm_effective_pooling_type` and
+`vllm_effective_prefix_caching`. A `None` return from the V1
+`reset_prefix_cache()` call is accepted as success; an explicit `False` is not.
+
 The patch is version checked and reversible. For Qwen3 it skips the unrelated
 GTE encoder-only attention backport:
 
