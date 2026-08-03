@@ -1480,6 +1480,21 @@ ENABLE_PREFIX_CACHING=0 \
 bash scripts/run_qwen3_reranker_vllm_310p_container.sh
 ```
 
+Run the complete 0625 Top25-to-Top10 sweep with the final FP16 pooling setup:
+
+```bash
+PULL_IMAGE=0 \
+bash scripts/sweep_qwen3_reranker_recall_topk_0625_310p.sh
+```
+
+The sweep uses one isolated output directory per K and writes
+`recall_topk_sweep.csv` plus `recall_topk_sweep.json` under
+`HOST_OUTPUT_BASE`. Both summaries contain `Accuracy@GTCount`,
+`score_time_seconds`, pair throughput, retained ground-truth recall, and time
+reduction relative to Top25. Existing per-K `metrics.json` files are reused by
+the matrix evaluator, so an interrupted sweep can be resumed with the same
+`HOST_OUTPUT_BASE`.
+
 The patch is version checked and reversible. For Qwen3 it skips the unrelated
 GTE encoder-only attention backport:
 
