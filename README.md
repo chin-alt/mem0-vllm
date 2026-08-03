@@ -1374,6 +1374,18 @@ It also defaults the engine capacity to 16 sequences and 16384 batched tokens
 when `MAX_LENGTH=1024`. Override `VLLM_COMPILATION_CONFIG`, `MAX_NUM_SEQS`, or
 `MAX_NUM_BATCHED_TOKENS` explicitly to run an A/B comparison.
 
+The launcher also forwards the official Ascend host-delivery and allocator
+settings into the container:
+
+```bash
+TASK_QUEUE_ENABLE=2
+CPU_AFFINITY_CONF=1
+PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+```
+
+Set either scheduling variable to `0`, or set
+`PYTORCH_NPU_ALLOC_CONF=` explicitly, to isolate each setting in an A/B run.
+
 The business recall JSON may be a mapping from each query to its candidate
 document list. The evaluator reads the complete JSON before inference, keeps
 all documents for the same query contiguous, sorts only inside each query

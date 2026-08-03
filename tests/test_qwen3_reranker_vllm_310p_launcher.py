@@ -31,6 +31,21 @@ class Qwen3RerankerVllm310pLauncherTests(unittest.TestCase):
             self.script,
         )
 
+    def test_official_ascend_runtime_settings_are_forwarded(self):
+        expected_defaults = {
+            "TASK_QUEUE_ENABLE": "2",
+            "CPU_AFFINITY_CONF": "1",
+            "PYTORCH_NPU_ALLOC_CONF": "max_split_size_mb:256",
+        }
+        for name, default in expected_defaults.items():
+            with self.subTest(name=name):
+                operator = "-" if name == "PYTORCH_NPU_ALLOC_CONF" else ":-"
+                self.assertIn(
+                    f'{name}="${{{name}{operator}{default}}}"',
+                    self.script,
+                )
+                self.assertIn(f'-e "{name}=${{{name}}}"', self.script)
+
 
 if __name__ == "__main__":
     unittest.main()

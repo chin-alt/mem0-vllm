@@ -32,6 +32,9 @@ if [[ -z "${VLLM_COMPILATION_CONFIG}" ]]; then
   # Official v0.10.0rc1-310p recommendation for Qwen3 eager inference.
   VLLM_COMPILATION_CONFIG='{"custom_ops":["none","+rms_norm","+rotary_embedding"]}'
 fi
+TASK_QUEUE_ENABLE="${TASK_QUEUE_ENABLE:-2}"
+CPU_AFFINITY_CONF="${CPU_AFFINITY_CONF:-1}"
+PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF-max_split_size_mb:256}"
 INSTALL_EVAL_DEPS="${INSTALL_EVAL_DEPS:-1}"
 APPLY_310P_PATCH="${APPLY_310P_PATCH:-1}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.huaweicloud.com/repository/pypi/simple}"
@@ -57,6 +60,7 @@ npu-smi info >/dev/null
 
 echo "[config] batch_size=${BATCH_SIZE} max_num_seqs=${MAX_NUM_SEQS} max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
 echo "[config] compilation_config=${VLLM_COMPILATION_CONFIG}"
+echo "[config] task_queue=${TASK_QUEUE_ENABLE} cpu_affinity=${CPU_AFFINITY_CONF} pytorch_npu_alloc=${PYTORCH_NPU_ALLOC_CONF:-disabled}"
 
 if [[ "${PULL_IMAGE}" == "1" ]]; then
   docker pull "${IMAGE}"
@@ -100,6 +104,9 @@ docker_args=(
   -e "SHOW_PROGRESS=${SHOW_PROGRESS}"
   -e "VLLM_QUANTIZATION=${VLLM_QUANTIZATION}"
   -e "VLLM_COMPILATION_CONFIG=${VLLM_COMPILATION_CONFIG}"
+  -e "TASK_QUEUE_ENABLE=${TASK_QUEUE_ENABLE}"
+  -e "CPU_AFFINITY_CONF=${CPU_AFFINITY_CONF}"
+  -e "PYTORCH_NPU_ALLOC_CONF=${PYTORCH_NPU_ALLOC_CONF}"
   -e "INSTALL_EVAL_DEPS=${INSTALL_EVAL_DEPS}"
   -e "APPLY_310P_PATCH=${APPLY_310P_PATCH}"
   -e "PIP_INDEX_URL=${PIP_INDEX_URL}"
