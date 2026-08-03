@@ -17,7 +17,7 @@ Environment overrides:
   MODEL_NAMES                    Optional whitespace-separated model names.
   MODEL_PATHS                    Optional |-separated model paths matching MODEL_NAMES.
   MAX_LENGTH                     Max sequence length. Default: 2048
-  BATCH_SIZE                     vLLM LLM.score chunk size. Default: 64
+  BATCH_SIZE                     Compatibility chunk size when SUBMIT_ALL_AT_ONCE=0. Default: 64
   SCORING_BACKEND                pooling or generate. Default: pooling
   EXPECTED_FBETA_BETA            Beta for dynamic Expected-Fbeta cutoff. Default: 0.3
   DTYPE                          auto, bfloat16, float16, or float32. Default: float16
@@ -27,7 +27,10 @@ Environment overrides:
   MAX_NUM_SEQS                   vLLM max_num_seqs. Default: 64
   WARMUP_PAIRS                   Untimed warm-up pairs before measurement. Default: 0
   ENFORCE_EAGER                  Disable ACL Graph capture. Default: 0
-  ENABLE_PREFIX_CACHING          Enable vLLM prefix caching if supported. Default: 0
+  ENABLE_PREFIX_CACHING          Enable vLLM prefix caching if supported. Default: 1
+  SUBMIT_ALL_AT_ONCE             Submit the complete grouped dataset once. Default: 1
+  GROUP_BY_QUERY                 Keep documents for the same query contiguous. Default: 1
+  SHOW_PROGRESS                  Print per-submission tqdm progress. Default: 0
   VLLM_ADDITIONAL_CONFIG         Optional JSON object for LLM(..., additional_config=...).
   VLLM_COMPILATION_CONFIG        Optional JSON object for LLM(..., compilation_config=...).
   VLLM_QUANTIZATION              Optional quantization name, e.g. ascend for W8A8 weights.
@@ -77,7 +80,10 @@ WARMUP_PAIRS="${WARMUP_PAIRS:-0}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
 SORT_BY_LENGTH="${SORT_BY_LENGTH:-1}"
 SORT_DESCENDING="${SORT_DESCENDING:-0}"
-ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
+ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
+SUBMIT_ALL_AT_ONCE="${SUBMIT_ALL_AT_ONCE:-1}"
+GROUP_BY_QUERY="${GROUP_BY_QUERY:-1}"
+SHOW_PROGRESS="${SHOW_PROGRESS:-0}"
 LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-1}"
 INSTRUCTION="${INSTRUCTION:-Given a user query, retrieve relevant documents that answer the query.}"
 GT_QUERY_COL="${GT_QUERY_COL:-query}"
@@ -227,6 +233,25 @@ fi
 if [[ -n "${VLLM_QUANTIZATION:-}" ]]; then
   optional_vllm_args+=(--quantization "${VLLM_QUANTIZATION}")
 fi
+
+submission_args=()
+if [[ "${SUBMIT_ALL_AT_ONCE}" == "1" ]]; then
+  submission_args+=(--submit_all_at_once)
+else
+  submission_args+=(--no_submit_all_at_once)
+fi
+
+query_group_args=()
+if [[ "${GROUP_BY_QUERY}" == "1" ]]; then
+  query_group_args+=(--group_by_query)
+else
+  query_group_args+=(--no_group_by_query)
+fi
+
+progress_args=()
+if [[ "${SHOW_PROGRESS}" == "1" ]]; then
+  progress_args+=(--show_progress)
+fi
 if [[ -n "${VLLM_LOAD_FORMAT:-}" ]]; then
   optional_vllm_args+=(--load_format "${VLLM_LOAD_FORMAT}")
 fi
@@ -324,6 +349,9 @@ run_one() {
     --top_k_list "${TOP_K_ARGS[@]}" \
     "${sort_args[@]}" \
     "${prefix_cache_args[@]}" \
+    "${submission_args[@]}" \
+    "${query_group_args[@]}" \
+    "${progress_args[@]}" \
     "${local_model_args[@]}" \
     "${optional_vllm_args[@]}"
 

@@ -146,7 +146,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recall_id_key", default="id")
     parser.add_argument("--recall_text_key", default="text")
     parser.add_argument("--max_length", type=int, default=2048)
-    parser.add_argument("--batch_size", type=int, default=256, help="Chunk size for vLLM score().")
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=256,
+        help=(
+            "Compatibility chunk size used only with --no_submit_all_at_once. "
+            "The default submits the complete dataset once and lets vLLM enforce "
+            "max_num_seqs/max_num_batched_tokens internally."
+        ),
+    )
     parser.add_argument(
         "--model_family",
         choices=["qwen3", "gte"],
@@ -231,6 +240,34 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--enable_prefix_caching", action="store_true", default=True)
     parser.add_argument("--no_enable_prefix_caching", dest="enable_prefix_caching", action="store_false")
+    parser.add_argument(
+        "--submit_all_at_once",
+        action="store_true",
+        default=True,
+        help="Submit the complete grouped dataset in one vLLM call for continuous batching.",
+    )
+    parser.add_argument(
+        "--no_submit_all_at_once",
+        dest="submit_all_at_once",
+        action="store_false",
+        help="Restore compatibility chunking with --batch_size.",
+    )
+    parser.add_argument(
+        "--group_by_query",
+        action="store_true",
+        default=True,
+        help="Keep all documents for the same query contiguous before submission.",
+    )
+    parser.add_argument(
+        "--no_group_by_query",
+        dest="group_by_query",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--show_progress",
+        action="store_true",
+        help="Show per-submission tqdm progress. Disabled by default to avoid log I/O overhead.",
+    )
     parser.add_argument("--sort_by_length", action="store_true", default=True)
     parser.add_argument("--no_sort_by_length", dest="sort_by_length", action="store_false")
     parser.add_argument("--sort_descending", action="store_true", help="Score longer pairs first when length sorting.")
@@ -748,6 +785,48 @@ def summarize_batch_latency(events: list[dict[str, Any]]) -> dict[str, float | i
     }
 
 
+def order_score_pairs(
+    queries: list[str],
+    documents: list[str],
+    *,
+    group_by_query: bool,
+    sort_by_length: bool,
+    sort_descending: bool,
+) -> list[tuple[int, str, str, int]]:
+    """Order pairs for cache locality while retaining their original indices.
+
+    Recall JSON is normally a mapping from query to a list of documents, so it
+    already arrives query-grouped. Rebuilding the groups here also handles
+    callers that provide interleaved pairs. Length sorting is deliberately
+    limited to each query group so it cannot destroy query-prefix locality.
+    """
+    indexed = [
+        (idx, query, document, len(query) + len(document))
+        for idx, (query, document) in enumerate(zip(queries, documents))
+    ]
+    if not group_by_query:
+        if sort_by_length:
+            indexed.sort(key=lambda item: item[3], reverse=sort_descending)
+        return indexed
+
+    query_order: list[str] = []
+    query_groups: dict[str, list[tuple[int, str, str, int]]] = {}
+    for item in indexed:
+        query = item[1]
+        if query not in query_groups:
+            query_order.append(query)
+            query_groups[query] = []
+        query_groups[query].append(item)
+
+    ordered: list[tuple[int, str, str, int]] = []
+    for query in query_order:
+        group = query_groups[query]
+        if sort_by_length:
+            group.sort(key=lambda item: item[3], reverse=sort_descending)
+        ordered.extend(group)
+    return ordered
+
+
 def score_with_vllm(
     llm: Any,
     queries: list[str],
@@ -762,6 +841,9 @@ def score_with_vllm(
     local_files_only: bool = False,
     model_family: str | None = None,
     max_length: int | None = None,
+    submit_all_at_once: bool = True,
+    group_by_query: bool = True,
+    show_progress: bool = False,
 ) -> list[float]:
     if len(queries) != len(documents):
         raise ValueError(f"queries/documents length mismatch: {len(queries)} != {len(documents)}")
@@ -770,12 +852,13 @@ def score_with_vllm(
     if not queries:
         return []
 
-    indexed = [
-        (idx, query, document, len(query) + len(document))
-        for idx, (query, document) in enumerate(zip(queries, documents))
-    ]
-    if sort_by_length:
-        indexed.sort(key=lambda item: item[3], reverse=sort_descending)
+    indexed = order_score_pairs(
+        queries,
+        documents,
+        group_by_query=group_by_query,
+        sort_by_length=sort_by_length,
+        sort_descending=sort_descending,
+    )
 
     scores: list[float | None] = [None] * len(indexed)
     backend = scoring_backend or getattr(llm, "_memranker_scoring_backend", "pooling")
@@ -798,17 +881,20 @@ def score_with_vllm(
             local_files_only=local_files_only,
         )
         sampling_params = build_generate_sampling_params(llm, yes_token_id, no_token_id)
-    total_batches = math.ceil(len(indexed) / batch_size)
+    submission_size = len(indexed) if submit_all_at_once else batch_size
+    submission_starts = range(0, len(indexed), submission_size)
+    total_batches = math.ceil(len(indexed) / submission_size)
     progress = tqdm(
-        range(0, len(indexed), batch_size),
+        submission_starts,
         total=total_batches,
-        desc="vLLM scoring",
-        unit="batch",
+        desc="vLLM submissions",
+        unit="submission",
         dynamic_ncols=True,
         ascii=True,
+        disable=not show_progress,
     )
     for start in progress:
-        batch = indexed[start : start + batch_size]
+        batch = indexed[start : start + submission_size]
         batch_queries = [item[1] for item in batch]
         batch_documents = [item[2] for item in batch]
         batch_max_chars = max(item[3] for item in batch)
@@ -847,11 +933,12 @@ def score_with_vllm(
                     raise RuntimeError("Internal error: missing yes/no token ids for generate scoring")
                 scores[original_idx] = extract_yes_no_score_from_generate_output(output, yes_token_id, no_token_id)
         completed = min(start + len(batch), len(indexed))
-        progress.set_postfix(
-            scored=completed,
-            max_chars=batch_max_chars,
-            sec=f"{batch_seconds:.2f}",
-        )
+        if show_progress:
+            progress.set_postfix(
+                scored=completed,
+                max_chars=batch_max_chars,
+                sec=f"{batch_seconds:.2f}",
+            )
         if progress_callback is not None:
             progress_callback(
                 {
@@ -906,6 +993,14 @@ def main() -> None:
     if not mapping:
         raise ValueError("No query-document pairs to score after matching recall data to ground truth.")
     logger.info("Total query-doc pairs to score: %d", len(mapping))
+    logger.info(
+        "Submission plan: query_groups=%d submit_all_at_once=%s "
+        "sort_within_query=%s prefix_caching=%s",
+        len({row["query"] for row in mapping}),
+        args.submit_all_at_once,
+        args.sort_by_length if args.group_by_query else False,
+        args.enable_prefix_caching,
+    )
 
     llm = create_vllm_llm(args)
     queries = [row["query"] for row in mapping]
@@ -929,6 +1024,9 @@ def main() -> None:
             local_files_only=args.local_files_only,
             model_family=args.model_family,
             max_length=args.max_length,
+            submit_all_at_once=args.submit_all_at_once,
+            group_by_query=args.group_by_query,
+            show_progress=args.show_progress,
         )
 
     batch_latency_events: list[dict[str, Any]] = []
@@ -947,6 +1045,9 @@ def main() -> None:
         model_family=args.model_family,
         max_length=args.max_length,
         progress_callback=batch_latency_events.append,
+        submit_all_at_once=args.submit_all_at_once,
+        group_by_query=args.group_by_query,
+        show_progress=args.show_progress,
     )
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(scores))
@@ -996,6 +1097,11 @@ def main() -> None:
             "load_format": args.load_format,
             "sort_by_length": args.sort_by_length,
             "sort_descending": args.sort_descending,
+            "submit_all_at_once": args.submit_all_at_once,
+            "group_by_query": args.group_by_query,
+            "show_progress": args.show_progress,
+            "num_query_groups": len(set(queries)),
+            "num_submission_calls": len(batch_latency_events),
             "local_files_only": args.local_files_only,
             "score_time_seconds": float(score_time),
             "seconds_per_example": float(sec_per_example),

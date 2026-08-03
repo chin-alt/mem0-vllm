@@ -1362,6 +1362,24 @@ PULL_IMAGE=0 \
 bash scripts/run_qwen3_reranker_vllm_310p_container.sh
 ```
 
+The business recall JSON may be a mapping from each query to its candidate
+document list. The evaluator reads the complete JSON before inference, keeps
+all documents for the same query contiguous, sorts only inside each query
+group, and submits the complete dataset in one `LLM.score()` call. vLLM then
+enforces `MAX_NUM_SEQS` and `MAX_NUM_BATCHED_TOKENS` internally, allowing it to
+continuously refill the device instead of waiting on Python-side chunks.
+Prefix caching is enabled by default on this launcher so the shared instruction
+and query prefix can be reused. The behavior can be isolated or rolled back
+without changing the model:
+
+```bash
+SUBMIT_ALL_AT_ONCE=0 \
+GROUP_BY_QUERY=0 \
+ENABLE_PREFIX_CACHING=0 \
+SHOW_PROGRESS=1 \
+bash scripts/run_qwen3_reranker_vllm_310p_container.sh
+```
+
 The patch is version checked and reversible. For Qwen3 it skips the unrelated
 GTE encoder-only attention backport:
 
