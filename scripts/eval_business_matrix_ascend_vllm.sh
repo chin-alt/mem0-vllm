@@ -31,6 +31,8 @@ Environment overrides:
   SUBMIT_ALL_AT_ONCE             Submit the complete grouped dataset once. Default: 1
   GROUP_BY_QUERY                 Keep documents for the same query contiguous. Default: 1
   SHOW_PROGRESS                  Print per-submission tqdm progress. Default: 0
+  PRETOKENIZED_POOLING           Batch-tokenize verified TokensPrompt inputs for LLM.encode. Default: 0
+  TOKENIZER_BATCH_SIZE           Fast-tokenizer buffer size without padding. Default: 256
   VLLM_ADDITIONAL_CONFIG         Optional JSON object for LLM(..., additional_config=...).
   VLLM_COMPILATION_CONFIG        Optional JSON object for LLM(..., compilation_config=...).
   VLLM_QUANTIZATION              Optional quantization name, e.g. ascend for W8A8 weights.
@@ -84,6 +86,8 @@ ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
 SUBMIT_ALL_AT_ONCE="${SUBMIT_ALL_AT_ONCE:-1}"
 GROUP_BY_QUERY="${GROUP_BY_QUERY:-1}"
 SHOW_PROGRESS="${SHOW_PROGRESS:-0}"
+PRETOKENIZED_POOLING="${PRETOKENIZED_POOLING:-0}"
+TOKENIZER_BATCH_SIZE="${TOKENIZER_BATCH_SIZE:-256}"
 LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-1}"
 INSTRUCTION="${INSTRUCTION:-Given a user query, retrieve relevant documents that answer the query.}"
 GT_QUERY_COL="${GT_QUERY_COL:-query}"
@@ -252,6 +256,11 @@ progress_args=()
 if [[ "${SHOW_PROGRESS}" == "1" ]]; then
   progress_args+=(--show_progress)
 fi
+
+pretokenized_args=()
+if [[ "${PRETOKENIZED_POOLING}" == "1" ]]; then
+  pretokenized_args+=(--pretokenized_pooling)
+fi
 if [[ -n "${VLLM_LOAD_FORMAT:-}" ]]; then
   optional_vllm_args+=(--load_format "${VLLM_LOAD_FORMAT}")
 fi
@@ -337,6 +346,7 @@ run_one() {
     --gt_doc_id_col "${gt_doc_id_col}" \
     --max_length "${MAX_LENGTH}" \
     --batch_size "${BATCH_SIZE}" \
+    --tokenizer_batch_size "${TOKENIZER_BATCH_SIZE}" \
     --scoring_backend "${SCORING_BACKEND}" \
     --device_backend ascend \
     --dtype "${DTYPE}" \
@@ -352,6 +362,7 @@ run_one() {
     "${submission_args[@]}" \
     "${query_group_args[@]}" \
     "${progress_args[@]}" \
+    "${pretokenized_args[@]}" \
     "${local_model_args[@]}" \
     "${optional_vllm_args[@]}"
 

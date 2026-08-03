@@ -26,6 +26,8 @@ ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
 SUBMIT_ALL_AT_ONCE="${SUBMIT_ALL_AT_ONCE:-1}"
 GROUP_BY_QUERY="${GROUP_BY_QUERY:-1}"
 SHOW_PROGRESS="${SHOW_PROGRESS:-0}"
+PRETOKENIZED_POOLING="${PRETOKENIZED_POOLING:-0}"
+TOKENIZER_BATCH_SIZE="${TOKENIZER_BATCH_SIZE:-256}"
 VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}"
 VLLM_COMPILATION_CONFIG="${VLLM_COMPILATION_CONFIG:-}"
 if [[ -z "${VLLM_COMPILATION_CONFIG}" ]]; then
@@ -38,9 +40,28 @@ PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF-max_split_size_mb:256}"
 INSTALL_EVAL_DEPS="${INSTALL_EVAL_DEPS:-1}"
 APPLY_310P_PATCH="${APPLY_310P_PATCH:-1}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.huaweicloud.com/repository/pypi/simple}"
+if [[ -z "${TOKENIZERS_PARALLELISM+x}" ]]; then
+  if [[ "${PRETOKENIZED_POOLING}" == "1" ]]; then
+    TOKENIZERS_PARALLELISM=true
+  else
+    TOKENIZERS_PARALLELISM=false
+  fi
+fi
 
 if [[ "${SCORING_BACKEND}" != "pooling" && "${SCORING_BACKEND}" != "generate" ]]; then
   echo "[invalid] SCORING_BACKEND must be pooling or generate" >&2
+  exit 2
+fi
+if [[ "${PRETOKENIZED_POOLING}" != "0" && "${PRETOKENIZED_POOLING}" != "1" ]]; then
+  echo "[invalid] PRETOKENIZED_POOLING must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "${PRETOKENIZED_POOLING}" == "1" && "${SCORING_BACKEND}" != "pooling" ]]; then
+  echo "[invalid] PRETOKENIZED_POOLING=1 requires SCORING_BACKEND=pooling" >&2
+  exit 2
+fi
+if ! [[ "${TOKENIZER_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[invalid] TOKENIZER_BATCH_SIZE must be a positive integer" >&2
   exit 2
 fi
 
@@ -59,6 +80,7 @@ fi
 npu-smi info >/dev/null
 
 echo "[config] batch_size=${BATCH_SIZE} max_num_seqs=${MAX_NUM_SEQS} max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
+echo "[config] pretokenized_pooling=${PRETOKENIZED_POOLING} tokenizer_batch_size=${TOKENIZER_BATCH_SIZE} tokenizers_parallelism=${TOKENIZERS_PARALLELISM}"
 echo "[config] compilation_config=${VLLM_COMPILATION_CONFIG}"
 echo "[config] task_queue=${TASK_QUEUE_ENABLE} cpu_affinity=${CPU_AFFINITY_CONF} pytorch_npu_alloc=${PYTORCH_NPU_ALLOC_CONF:-disabled}"
 
@@ -102,6 +124,9 @@ docker_args=(
   -e "SUBMIT_ALL_AT_ONCE=${SUBMIT_ALL_AT_ONCE}"
   -e "GROUP_BY_QUERY=${GROUP_BY_QUERY}"
   -e "SHOW_PROGRESS=${SHOW_PROGRESS}"
+  -e "PRETOKENIZED_POOLING=${PRETOKENIZED_POOLING}"
+  -e "TOKENIZER_BATCH_SIZE=${TOKENIZER_BATCH_SIZE}"
+  -e "TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM}"
   -e "VLLM_QUANTIZATION=${VLLM_QUANTIZATION}"
   -e "VLLM_COMPILATION_CONFIG=${VLLM_COMPILATION_CONFIG}"
   -e "TASK_QUEUE_ENABLE=${TASK_QUEUE_ENABLE}"

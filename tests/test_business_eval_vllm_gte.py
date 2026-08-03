@@ -2,7 +2,8 @@ import sys
 import unittest
 
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -14,21 +15,42 @@ from business_eval_vllm import (  # noqa: E402
     QWEN3_RERANKER_HF_OVERRIDES,
     format_gte_score_inputs,
     format_qwen3_score_inputs,
+    extract_vllm_score,
     order_score_pairs,
     pooling_api_kwargs,
     pooling_hf_overrides,
+    prepare_pretokenized_pooling_inputs,
     score_with_vllm,
     summarize_batch_latency,
 )
 
 
 class GteVllmTests(unittest.TestCase):
+    @staticmethod
+    def _fake_vllm_module():
+        module = ModuleType("vllm")
+
+        class FakePoolingParams:
+            def __init__(self, task=None):
+                self.task = task
+
+        module.PoolingParams = FakePoolingParams
+        return module
+
     def test_pooling_api_uses_task_score_on_vllm_0100(self):
         class LegacyLlm:
             def __init__(self, model, *, task="auto", **kwargs):
                 pass
 
         self.assertEqual(pooling_api_kwargs(LegacyLlm), {"task": "score"})
+
+    def test_extract_score_accepts_base_pooling_tensor_like_output(self):
+        class TensorLike:
+            def tolist(self):
+                return [0.75]
+
+        output = SimpleNamespace(outputs=SimpleNamespace(data=TensorLike()))
+        self.assertEqual(extract_vllm_score(output), 0.75)
 
     def test_pooling_api_uses_runner_on_vllm_0102(self):
         class RunnerLlm:
@@ -133,6 +155,128 @@ class GteVllmTests(unittest.TestCase):
         self.assertEqual(llm.calls[0][0], ["q1", "q1", "q2"])
         self.assertEqual(llm.calls[0][1], ["1", "333", "22"])
         self.assertEqual(scores, [333.0, 22.0, 1.0])
+
+    def test_pretokenized_pooling_batches_validates_and_uses_encode_score(self):
+        class FakeFastTokenizer:
+            is_fast = True
+
+            def __init__(self):
+                self.batch_calls = []
+                self.scalar_calls = []
+
+            @staticmethod
+            def token_ids(text, max_length):
+                return [ord(char) % 97 for char in text][:max_length]
+
+            def __call__(self, *, text, max_length, truncation, **kwargs):
+                self.assert_common(max_length, truncation)
+                if isinstance(text, list):
+                    self.batch_calls.append((list(text), dict(kwargs)))
+                    return {
+                        "input_ids": [self.token_ids(item, max_length) for item in text]
+                    }
+                self.scalar_calls.append((text, dict(kwargs)))
+                return {"input_ids": self.token_ids(text, max_length)}
+
+            @staticmethod
+            def assert_common(max_length, truncation):
+                if max_length != 512 or truncation is not True:
+                    raise AssertionError("unexpected tokenizer truncation settings")
+
+        class FakeLlm:
+            _memranker_scoring_backend = "pooling"
+            _memranker_model_family = "qwen3"
+
+            def __init__(self):
+                self.tokenizer = FakeFastTokenizer()
+                self.llm_engine = SimpleNamespace(
+                    model_config=SimpleNamespace(use_pad_token=False)
+                )
+                self.encode_calls = []
+
+            def get_tokenizer(self):
+                return self.tokenizer
+
+            def encode(self, prompts, pooling_params, **kwargs):
+                self.encode_calls.append((prompts, pooling_params, kwargs))
+                return [
+                    SimpleNamespace(outputs=SimpleNamespace(data=[float(index)]))
+                    for index in range(len(prompts))
+                ]
+
+            def score(self, *args, **kwargs):
+                raise AssertionError("PRETOKENIZED_POOLING must not call LLM.score")
+
+        llm = FakeLlm()
+        timings = {}
+        events = []
+        with patch.dict(sys.modules, {"vllm": self._fake_vllm_module()}):
+            scores = score_with_vllm(
+                llm,
+                queries=["q1", "q2", "q1"],
+                documents=["333", "22", "1"],
+                batch_size=16,
+                instruction="instruction",
+                sort_by_length=True,
+                max_length=512,
+                submit_all_at_once=True,
+                group_by_query=True,
+                pretokenized_pooling=True,
+                tokenizer_batch_size=2,
+                timing_metrics=timings,
+                progress_callback=events.append,
+            )
+
+        self.assertEqual(len(llm.encode_calls), 1)
+        prompts, pooling_params, encode_kwargs = llm.encode_calls[0]
+        self.assertEqual(pooling_params.task, "score")
+        self.assertEqual(encode_kwargs["pooling_task"], "score")
+        self.assertEqual(encode_kwargs["tokenization_kwargs"], {})
+        self.assertEqual(len(prompts), 3)
+        self.assertTrue(all(set(prompt) == {"prompt_token_ids"} for prompt in prompts))
+        self.assertEqual(len(llm.tokenizer.batch_calls), 2)
+        self.assertEqual(len(llm.tokenizer.scalar_calls), 3)
+        self.assertTrue(
+            all(call_kwargs["padding"] is False for _, call_kwargs in llm.tokenizer.batch_calls)
+        )
+        self.assertEqual(scores, [1.0, 2.0, 0.0])
+        self.assertEqual(timings["num_token_ids_validated"], 3)
+        self.assertTrue(timings["token_id_parity_passed"])
+        self.assertIn("prompt_format_time_seconds", timings)
+        self.assertIn("tokenizer_time_seconds", timings)
+        self.assertIn("vllm_enqueue_and_npu_execute_time_seconds", timings)
+        self.assertIn("pretokenized_total_time_seconds", timings)
+        self.assertEqual(events[0]["batch_size"], 3)
+
+    def test_pretokenized_pooling_refuses_mismatch_before_encode(self):
+        class MismatchingFastTokenizer:
+            is_fast = True
+
+            def __init__(self):
+                self.encode_called = False
+
+            def __call__(self, *, text, max_length, truncation, **kwargs):
+                if isinstance(text, list):
+                    return {"input_ids": [[1, 999] for _ in text]}
+                return {"input_ids": [1, 2]}
+
+        tokenizer = MismatchingFastTokenizer()
+        llm = SimpleNamespace(
+            get_tokenizer=lambda: tokenizer,
+            llm_engine=SimpleNamespace(
+                model_config=SimpleNamespace(use_pad_token=False)
+            ),
+        )
+        indexed = [(0, "query", "document", 13)]
+        with self.assertRaisesRegex(RuntimeError, "No request was submitted"):
+            prepare_pretokenized_pooling_inputs(
+                llm,
+                indexed,
+                instruction="instruction",
+                model_family="qwen3",
+                max_length=512,
+                tokenizer_batch_size=256,
+            )
 
     def test_query_grouping_preserves_first_query_order(self):
         ordered = order_score_pairs(

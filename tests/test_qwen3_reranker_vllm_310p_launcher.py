@@ -26,6 +26,18 @@ class Qwen3RerankerVllm310pLauncherTests(unittest.TestCase):
             "'{\"custom_ops\":[\"none\",\"+rms_norm\",\"+rotary_embedding\"]}'",
             self.script,
         )
+
+    def test_pretokenized_pooling_is_opt_in_and_buffered(self):
+        self.assertIn('PRETOKENIZED_POOLING="${PRETOKENIZED_POOLING:-0}"', self.script)
+        self.assertIn('TOKENIZER_BATCH_SIZE="${TOKENIZER_BATCH_SIZE:-256}"', self.script)
+        self.assertIn('-e "PRETOKENIZED_POOLING=${PRETOKENIZED_POOLING}"', self.script)
+        self.assertIn('-e "TOKENIZER_BATCH_SIZE=${TOKENIZER_BATCH_SIZE}"', self.script)
+
+    def test_query_grouping_and_prefix_cache_remain_enabled(self):
+        self.assertIn('ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"', self.script)
+        self.assertIn('GROUP_BY_QUERY="${GROUP_BY_QUERY:-1}"', self.script)
+        self.assertIn('-e "ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING}"', self.script)
+        self.assertIn('-e "GROUP_BY_QUERY=${GROUP_BY_QUERY}"', self.script)
         self.assertIn(
             '-e "VLLM_COMPILATION_CONFIG=${VLLM_COMPILATION_CONFIG}"',
             self.script,

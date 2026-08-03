@@ -268,6 +268,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show per-submission tqdm progress. Disabled by default to avoid log I/O overhead.",
     )
+    parser.add_argument(
+        "--pretokenized_pooling",
+        action="store_true",
+        help=(
+            "For pooling models, batch-tokenize every complete prompt with the "
+            "Hugging Face fast tokenizer, verify every token-id sequence against "
+            "the legacy LLM.score tokenizer path, then submit TokensPrompt inputs "
+            "to LLM.encode with PoolingParams(task='score')."
+        ),
+    )
+    parser.add_argument(
+        "--tokenizer_batch_size",
+        type=int,
+        default=256,
+        help="Fast-tokenizer batch size for --pretokenized_pooling. No padding is applied.",
+    )
     parser.add_argument("--sort_by_length", action="store_true", default=True)
     parser.add_argument("--no_sort_by_length", dest="sort_by_length", action="store_false")
     parser.add_argument("--sort_descending", action="store_true", help="Score longer pairs first when length sorting.")
@@ -658,6 +674,15 @@ def maybe_extract_numeric(value: Any) -> float | None:
                     return score
     if isinstance(value, np.ndarray):
         return maybe_extract_numeric(value.tolist())
+    # LLM.encode returns the base PoolingRequestOutput rather than the
+    # ScoringRequestOutput wrapper produced by LLM.score. Its ``outputs.data``
+    # can therefore still be a CPU torch.Tensor. Avoid importing torch in this
+    # evaluator and normalize any tensor-like value through its public tolist.
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        converted = tolist()
+        if converted is not value:
+            return maybe_extract_numeric(converted)
     if isinstance(value, (list, tuple)):
         if value and all(isinstance(item, (int, float, np.floating, np.integer)) for item in value):
             if len(value) == 2:
@@ -697,6 +722,165 @@ def build_score_call_kwargs(llm: Any, max_length: int) -> dict[str, Any]:
         "use_tqdm": False,
     }
     return filter_supported_kwargs(llm.score, requested_kwargs, context="LLM.score")
+
+
+def build_score_pooling_params() -> Any:
+    try:
+        from vllm import PoolingParams
+    except ImportError:
+        # Some vendor builds do not re-export PoolingParams from vllm.__init__.
+        from vllm.pooling_params import PoolingParams
+
+    return PoolingParams(task="score")
+
+
+def build_pretokenized_encode_kwargs(llm: Any) -> dict[str, Any]:
+    requested_kwargs = {
+        "use_tqdm": False,
+        "pooling_task": "score",
+        # TokensPrompt already contains truncated IDs. Passing an explicit empty
+        # mapping prevents encode() from applying text-tokenization options.
+        "tokenization_kwargs": {},
+    }
+    supported = filter_supported_kwargs(
+        llm.encode,
+        requested_kwargs,
+        context="LLM.encode",
+    )
+    if supported.get("pooling_task") != "score":
+        raise RuntimeError(
+            "PRETOKENIZED_POOLING requires LLM.encode(..., pooling_task='score'); "
+            "the installed vLLM does not expose that API."
+        )
+    return supported
+
+
+def first_token_mismatch(expected: list[int], actual: list[int]) -> int | None:
+    for position, (expected_id, actual_id) in enumerate(zip(expected, actual)):
+        if expected_id != actual_id:
+            return position
+    if len(expected) != len(actual):
+        return min(len(expected), len(actual))
+    return None
+
+
+def prepare_pretokenized_pooling_inputs(
+    llm: Any,
+    indexed: list[tuple[int, str, str, int]],
+    *,
+    instruction: str,
+    model_family: str,
+    max_length: int,
+    tokenizer_batch_size: int,
+) -> tuple[list[dict[str, list[int]]], dict[str, float | int | bool]]:
+    """Build, batch-tokenize, and fully validate buffered TokensPrompt inputs.
+
+    The reference side deliberately reproduces vLLM 0.10.0 LLM.score's scalar
+    tokenizer call for every prompt. All comparisons finish before the caller
+    is allowed to enqueue any request, so a mismatch cannot produce a partial
+    NPU run.
+    """
+    if tokenizer_batch_size < 1:
+        raise ValueError("--tokenizer_batch_size must be >= 1")
+    if max_length < 1:
+        raise ValueError("--max_length must be >= 1")
+    if model_family != "qwen3":
+        raise ValueError("PRETOKENIZED_POOLING currently supports --model_family qwen3 only")
+
+    tokenizer = llm.get_tokenizer()
+    if not bool(getattr(tokenizer, "is_fast", False)):
+        raise RuntimeError(
+            "PRETOKENIZED_POOLING requires a Hugging Face fast tokenizer, but "
+            f"LLM.get_tokenizer() returned {type(tokenizer).__name__} with is_fast=False."
+        )
+
+    model_config = getattr(getattr(llm, "llm_engine", None), "model_config", None)
+    if model_config is None:
+        raise RuntimeError("PRETOKENIZED_POOLING could not read llm.llm_engine.model_config")
+    if bool(getattr(model_config, "use_pad_token", False)):
+        raise RuntimeError(
+            "PRETOKENIZED_POOLING's complete-prompt path requires "
+            "model_config.use_pad_token=False. Refusing to replace the legacy "
+            "text/text_pair tokenizer semantics."
+        )
+
+    preparation_start = time.perf_counter()
+    format_start = time.perf_counter()
+    formatted_queries, formatted_documents = format_qwen3_score_inputs(
+        [item[1] for item in indexed],
+        [item[2] for item in indexed],
+        instruction=instruction,
+    )
+    full_prompts = [
+        formatted_query + formatted_document
+        for formatted_query, formatted_document in zip(
+            formatted_queries,
+            formatted_documents,
+        )
+    ]
+    format_seconds = time.perf_counter() - format_start
+
+    token_ids_buffer: list[list[int]] = []
+    tokenizer_seconds = 0.0
+    for start in range(0, len(full_prompts), tokenizer_batch_size):
+        prompt_buffer = full_prompts[start : start + tokenizer_batch_size]
+        tokenize_start = time.perf_counter()
+        encoded = tokenizer(
+            text=prompt_buffer,
+            truncation=True,
+            max_length=max_length,
+            padding=False,
+            return_attention_mask=False,
+            return_token_type_ids=False,
+        )
+        tokenizer_seconds += time.perf_counter() - tokenize_start
+        batch_token_ids = encoded.get("input_ids")
+        if not isinstance(batch_token_ids, list) or len(batch_token_ids) != len(prompt_buffer):
+            raise RuntimeError(
+                "Fast tokenizer returned an invalid input_ids batch: "
+                f"expected {len(prompt_buffer)} rows, got {type(batch_token_ids).__name__}."
+            )
+        token_ids_buffer.extend([list(map(int, token_ids)) for token_ids in batch_token_ids])
+
+    validation_start = time.perf_counter()
+    for ordered_idx, (full_prompt, actual_ids) in enumerate(
+        zip(full_prompts, token_ids_buffer)
+    ):
+        reference = tokenizer(
+            text=full_prompt,
+            truncation=True,
+            max_length=max_length,
+        )
+        expected_ids = list(map(int, reference["input_ids"]))
+        mismatch_at = first_token_mismatch(expected_ids, actual_ids)
+        if mismatch_at is not None:
+            original_idx = indexed[ordered_idx][0]
+            expected_id = expected_ids[mismatch_at] if mismatch_at < len(expected_ids) else None
+            actual_id = actual_ids[mismatch_at] if mismatch_at < len(actual_ids) else None
+            raise RuntimeError(
+                "PRETOKENIZED_POOLING token parity check failed before vLLM submission: "
+                f"ordered_index={ordered_idx} original_index={original_idx} "
+                f"token_position={mismatch_at} expected_id={expected_id} "
+                f"actual_id={actual_id} expected_length={len(expected_ids)} "
+                f"actual_length={len(actual_ids)}. No request was submitted."
+            )
+    validation_seconds = time.perf_counter() - validation_start
+
+    token_prompts = [
+        {"prompt_token_ids": token_ids}
+        for token_ids in token_ids_buffer
+    ]
+    preparation_seconds = time.perf_counter() - preparation_start
+    timings: dict[str, float | int | bool] = {
+        "prompt_format_time_seconds": float(format_seconds),
+        "tokenizer_time_seconds": float(tokenizer_seconds),
+        "token_id_validation_time_seconds": float(validation_seconds),
+        "pretokenized_preparation_time_seconds": float(preparation_seconds),
+        "num_token_ids_validated": len(token_prompts),
+        "token_id_parity_passed": True,
+        "tokenizer_batch_size": tokenizer_batch_size,
+    }
+    return token_prompts, timings
 
 
 def load_yes_no_token_ids(model_path: str, tokenizer_path: str = "", local_files_only: bool = False) -> tuple[int, int]:
@@ -844,7 +1028,11 @@ def score_with_vllm(
     submit_all_at_once: bool = True,
     group_by_query: bool = True,
     show_progress: bool = False,
+    pretokenized_pooling: bool = False,
+    tokenizer_batch_size: int = 256,
+    timing_metrics: dict[str, Any] | None = None,
 ) -> list[float]:
+    score_call_start = time.perf_counter()
     if len(queries) != len(documents):
         raise ValueError(f"queries/documents length mismatch: {len(queries)} != {len(documents)}")
     if batch_size < 1:
@@ -865,6 +1053,13 @@ def score_with_vllm(
     resolved_model_family = model_family or getattr(llm, "_memranker_model_family", "qwen3")
     if backend not in {"pooling", "generate"}:
         raise ValueError(f"Unsupported scoring backend: {backend}")
+    if pretokenized_pooling:
+        if backend != "pooling":
+            raise ValueError("PRETOKENIZED_POOLING requires --scoring_backend pooling")
+        if not submit_all_at_once:
+            raise ValueError("PRETOKENIZED_POOLING requires --submit_all_at_once")
+        if max_length is None:
+            raise ValueError("PRETOKENIZED_POOLING requires --max_length")
     score_kwargs = (
         build_score_call_kwargs(llm, max_length=max_length)
         if backend == "pooling" and max_length is not None
@@ -881,74 +1076,115 @@ def score_with_vllm(
             local_files_only=local_files_only,
         )
         sampling_params = build_generate_sampling_params(llm, yes_token_id, no_token_id)
-    submission_size = len(indexed) if submit_all_at_once else batch_size
-    submission_starts = range(0, len(indexed), submission_size)
-    total_batches = math.ceil(len(indexed) / submission_size)
-    progress = tqdm(
-        submission_starts,
-        total=total_batches,
-        desc="vLLM submissions",
-        unit="submission",
-        dynamic_ncols=True,
-        ascii=True,
-        disable=not show_progress,
-    )
-    for start in progress:
-        batch = indexed[start : start + submission_size]
-        batch_queries = [item[1] for item in batch]
-        batch_documents = [item[2] for item in batch]
-        batch_max_chars = max(item[3] for item in batch)
-        batch_start_time = time.perf_counter()
-        if backend == "pooling":
-            if resolved_model_family == "gte":
-                formatted_queries, formatted_documents = format_gte_score_inputs(
-                    batch_queries,
-                    batch_documents,
-                    instruction=instruction,
-                )
-            elif resolved_model_family == "qwen3":
-                formatted_queries, formatted_documents = format_qwen3_score_inputs(
-                    batch_queries,
-                    batch_documents,
-                    instruction=instruction,
-                )
-            else:
-                raise ValueError(f"Unsupported vLLM model family: {resolved_model_family}")
-            outputs = llm.score(formatted_queries, formatted_documents, **score_kwargs)
-        else:
-            prompts = format_qwen3_generate_prompts(
-                batch_queries,
-                batch_documents,
-                instruction=instruction,
+    if pretokenized_pooling:
+        token_prompts, pretokenized_timings = prepare_pretokenized_pooling_inputs(
+            llm,
+            indexed,
+            instruction=instruction,
+            model_family=resolved_model_family,
+            max_length=max_length,
+            tokenizer_batch_size=tokenizer_batch_size,
+        )
+        pooling_params = build_score_pooling_params()
+        encode_kwargs = build_pretokenized_encode_kwargs(llm)
+        encode_start = time.perf_counter()
+        outputs = llm.encode(token_prompts, pooling_params, **encode_kwargs)
+        encode_seconds = time.perf_counter() - encode_start
+        if len(outputs) != len(indexed):
+            raise ValueError(
+                f"vLLM returned {len(outputs)} outputs for {len(indexed)} input pairs"
             )
-            outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-        batch_seconds = time.perf_counter() - batch_start_time
-        if len(outputs) != len(batch):
-            raise ValueError(f"vLLM returned {len(outputs)} outputs for {len(batch)} input pairs")
-        for (original_idx, _, _, _), output in zip(batch, outputs):
-            if backend == "pooling":
-                scores[original_idx] = extract_vllm_score(output)
-            else:
-                if yes_token_id is None or no_token_id is None:
-                    raise RuntimeError("Internal error: missing yes/no token ids for generate scoring")
-                scores[original_idx] = extract_yes_no_score_from_generate_output(output, yes_token_id, no_token_id)
-        completed = min(start + len(batch), len(indexed))
-        if show_progress:
-            progress.set_postfix(
-                scored=completed,
-                max_chars=batch_max_chars,
-                sec=f"{batch_seconds:.2f}",
-            )
+        for (original_idx, _, _, _), output in zip(indexed, outputs):
+            scores[original_idx] = extract_vllm_score(output)
         if progress_callback is not None:
             progress_callback(
                 {
-                    "completed": completed,
+                    "completed": len(indexed),
                     "total": len(indexed),
-                    "batch_size": len(batch),
-                    "batch_seconds": batch_seconds,
-                    "max_chars": batch_max_chars,
+                    "batch_size": len(indexed),
+                    "batch_seconds": encode_seconds,
+                    "max_chars": max(item[3] for item in indexed),
                 }
             )
+        pretokenized_timings["vllm_enqueue_and_npu_execute_time_seconds"] = float(
+            encode_seconds
+        )
+        pretokenized_timings["pretokenized_pipeline_time_seconds"] = float(
+            pretokenized_timings["prompt_format_time_seconds"]
+            + pretokenized_timings["tokenizer_time_seconds"]
+            + encode_seconds
+        )
+        if timing_metrics is not None:
+            timing_metrics.update(pretokenized_timings)
+    else:
+        submission_size = len(indexed) if submit_all_at_once else batch_size
+        submission_starts = range(0, len(indexed), submission_size)
+        total_batches = math.ceil(len(indexed) / submission_size)
+        progress = tqdm(
+            submission_starts,
+            total=total_batches,
+            desc="vLLM submissions",
+            unit="submission",
+            dynamic_ncols=True,
+            ascii=True,
+            disable=not show_progress,
+        )
+        for start in progress:
+            batch = indexed[start : start + submission_size]
+            batch_queries = [item[1] for item in batch]
+            batch_documents = [item[2] for item in batch]
+            batch_max_chars = max(item[3] for item in batch)
+            batch_start_time = time.perf_counter()
+            if backend == "pooling":
+                if resolved_model_family == "gte":
+                    formatted_queries, formatted_documents = format_gte_score_inputs(
+                        batch_queries,
+                        batch_documents,
+                        instruction=instruction,
+                    )
+                elif resolved_model_family == "qwen3":
+                    formatted_queries, formatted_documents = format_qwen3_score_inputs(
+                        batch_queries,
+                        batch_documents,
+                        instruction=instruction,
+                    )
+                else:
+                    raise ValueError(f"Unsupported vLLM model family: {resolved_model_family}")
+                outputs = llm.score(formatted_queries, formatted_documents, **score_kwargs)
+            else:
+                prompts = format_qwen3_generate_prompts(
+                    batch_queries,
+                    batch_documents,
+                    instruction=instruction,
+                )
+                outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
+            batch_seconds = time.perf_counter() - batch_start_time
+            if len(outputs) != len(batch):
+                raise ValueError(f"vLLM returned {len(outputs)} outputs for {len(batch)} input pairs")
+            for (original_idx, _, _, _), output in zip(batch, outputs):
+                if backend == "pooling":
+                    scores[original_idx] = extract_vllm_score(output)
+                else:
+                    if yes_token_id is None or no_token_id is None:
+                        raise RuntimeError("Internal error: missing yes/no token ids for generate scoring")
+                    scores[original_idx] = extract_yes_no_score_from_generate_output(output, yes_token_id, no_token_id)
+            completed = min(start + len(batch), len(indexed))
+            if show_progress:
+                progress.set_postfix(
+                    scored=completed,
+                    max_chars=batch_max_chars,
+                    sec=f"{batch_seconds:.2f}",
+                )
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "completed": completed,
+                        "total": len(indexed),
+                        "batch_size": len(batch),
+                        "batch_seconds": batch_seconds,
+                        "max_chars": batch_max_chars,
+                    }
+                )
 
     final_scores: list[float] = []
     bad_values = 0
@@ -963,6 +1199,10 @@ def score_with_vllm(
         raise ValueError(f"Returned score count mismatch: {len(final_scores)} != {len(queries)}")
     if bad_values:
         logger.warning("vLLM scores contain %d NaN/inf values.", bad_values)
+    if pretokenized_pooling and timing_metrics is not None:
+        timing_metrics["pretokenized_total_time_seconds"] = float(
+            time.perf_counter() - score_call_start
+        )
     return final_scores
 
 
@@ -995,12 +1235,20 @@ def main() -> None:
     logger.info("Total query-doc pairs to score: %d", len(mapping))
     logger.info(
         "Submission plan: query_groups=%d submit_all_at_once=%s "
-        "sort_within_query=%s prefix_caching=%s",
+        "sort_within_query=%s prefix_caching=%s pretokenized_pooling=%s",
         len({row["query"] for row in mapping}),
         args.submit_all_at_once,
         args.sort_by_length if args.group_by_query else False,
         args.enable_prefix_caching,
+        args.pretokenized_pooling,
     )
+
+    if args.tokenizer_batch_size < 1:
+        raise ValueError("--tokenizer_batch_size must be >= 1")
+    if args.pretokenized_pooling and args.scoring_backend != "pooling":
+        raise ValueError("--pretokenized_pooling requires --scoring_backend pooling")
+    if args.pretokenized_pooling and not args.submit_all_at_once:
+        raise ValueError("--pretokenized_pooling requires --submit_all_at_once")
 
     llm = create_vllm_llm(args)
     queries = [row["query"] for row in mapping]
@@ -1027,9 +1275,12 @@ def main() -> None:
             submit_all_at_once=args.submit_all_at_once,
             group_by_query=args.group_by_query,
             show_progress=args.show_progress,
+            pretokenized_pooling=args.pretokenized_pooling,
+            tokenizer_batch_size=args.tokenizer_batch_size,
         )
 
     batch_latency_events: list[dict[str, Any]] = []
+    scoring_timing_metrics: dict[str, Any] = {}
     start_time = time.perf_counter()
     scores = score_with_vllm(
         llm,
@@ -1048,6 +1299,9 @@ def main() -> None:
         submit_all_at_once=args.submit_all_at_once,
         group_by_query=args.group_by_query,
         show_progress=args.show_progress,
+        pretokenized_pooling=args.pretokenized_pooling,
+        tokenizer_batch_size=args.tokenizer_batch_size,
+        timing_metrics=scoring_timing_metrics,
     )
     score_time = time.perf_counter() - start_time
     sec_per_example = score_time / max(1, len(scores))
@@ -1058,6 +1312,17 @@ def main() -> None:
         score_time,
         examples_per_sec,
     )
+    if args.pretokenized_pooling:
+        logger.info(
+            "Pretokenized timing: format=%.3fs tokenizer=%.3fs validation=%.3fs "
+            "vllm_enqueue_and_npu_execute=%.3fs pipeline=%.3fs total=%.3fs",
+            scoring_timing_metrics["prompt_format_time_seconds"],
+            scoring_timing_metrics["tokenizer_time_seconds"],
+            scoring_timing_metrics["token_id_validation_time_seconds"],
+            scoring_timing_metrics["vllm_enqueue_and_npu_execute_time_seconds"],
+            scoring_timing_metrics["pretokenized_pipeline_time_seconds"],
+            scoring_timing_metrics["pretokenized_total_time_seconds"],
+        )
 
     ranked_predictions = attach_scores_and_ranks(
         mapping,
@@ -1100,6 +1365,8 @@ def main() -> None:
             "submit_all_at_once": args.submit_all_at_once,
             "group_by_query": args.group_by_query,
             "show_progress": args.show_progress,
+            "pretokenized_pooling": args.pretokenized_pooling,
+            "tokenizer_batch_size": args.tokenizer_batch_size,
             "num_query_groups": len(set(queries)),
             "num_submission_calls": len(batch_latency_events),
             "local_files_only": args.local_files_only,
@@ -1119,6 +1386,7 @@ def main() -> None:
             "skipped_recall_queries_without_gt": skipped_queries,
         }
     )
+    metrics.update(scoring_timing_metrics)
     metrics.update(summarize_batch_latency(batch_latency_events))
 
     output_dir = Path(args.output_dir)

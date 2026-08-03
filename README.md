@@ -1404,6 +1404,31 @@ SHOW_PROGRESS=1 \
 bash scripts/run_qwen3_reranker_vllm_310p_container.sh
 ```
 
+vLLM 0.10.0's `LLM.score()` tokenizes cross-encoder pairs one at a time before
+enqueueing them. The opt-in pretokenized pooling path replaces that loop with
+Hugging Face fast-tokenizer buffers (256 complete prompts per buffer, without
+padding) and submits all resulting `TokensPrompt` inputs once through
+`LLM.encode(..., PoolingParams(task="score"), pooling_task="score")`:
+
+```bash
+PRETOKENIZED_POOLING=1 \
+TOKENIZER_BATCH_SIZE=256 \
+SUBMIT_ALL_AT_ONCE=1 \
+GROUP_BY_QUERY=1 \
+ENABLE_PREFIX_CACHING=1 \
+bash scripts/run_qwen3_reranker_vllm_310p_container.sh
+```
+
+Before any request reaches vLLM, every batched token-ID sequence is compared
+with the legacy scalar-tokenizer result. A single mismatch aborts the run with
+`No request was submitted`. The complete buffered dataset is then handed to
+vLLM, whose existing `MAX_NUM_SEQS=16` and token budget still control the real
+NPU batch. `metrics.json` records prompt formatting, batched tokenization,
+full parity validation, combined vLLM enqueue/NPU execution, deployable
+pipeline, and wall-clock total times separately. The wall-clock total includes
+the mandatory parity gate; `pretokenized_pipeline_time_seconds` excludes only
+that verification pass and represents the steady-state inference path.
+
 The patch is version checked and reversible. For Qwen3 it skips the unrelated
 GTE encoder-only attention backport:
 
